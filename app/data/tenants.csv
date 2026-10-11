@@ -1,0 +1,20 @@
+property_id,tenant,category,suite,area_sf,rent_psf,lease_end,credit,sales_psf
+SC-001,Fresh Basket,Grocery,100,28600,18.75,2031-06-30,National,515
+SC-001,Anytime Fitness,Fitness,140,8500,22.5,2029-12-31,Regional,310
+SC-001,Nova Dental,Medical,180,3200,34.0,2028-09-30,Local,620
+SC-001,Desert Nail Bar,Service,190,1800,38.5,2027-05-31,Local,480
+SC-001,Cafe Luna,Restaurant,200,2600,41.0,2026-11-30,Local,690
+SC-001,Pet Pantry,Pet,220,5200,24.25,2030-03-31,Regional,360
+SC-001,Available,Vacant,230,5100,0.0,2026-12-31,None,0
+SC-002,Market Street Grocer,Grocery,100,39200,16.25,2030-10-31,Regional,470
+SC-002,HomeStyle Goods,Home,150,24000,14.75,2028-04-30,National,255
+SC-002,KidsCare Clinic,Medical,210,6200,29.5,2032-01-31,Regional,540
+SC-002,Salon Mint,Service,230,2200,32.0,2027-08-31,Local,405
+SC-002,Grill House,Restaurant,240,4100,35.25,2029-02-28,Local,610
+SC-002,Available,Vacant,260,12800,0.0,2026-12-31,None,0
+SC-003,Urban Organics,Grocery,100,18200,31.5,2034-07-31,National,720
+SC-003,CorePower Studio,Fitness,130,7400,36.75,2031-03-31,National,455
+SC-003,Bluebird Cafe,Restaurant,150,2800,52.0,2028-10-31,Local,820
+SC-003,Austin Eye Co.,Medical,170,3600,48.5,2030-06-30,Regional,700
+SC-003,The UPS Store,Service,180,1600,45.0,2029-09-30,National,590
+SC-003,Available,Vacant,190,2000,0.0,2026-12-31,None,0

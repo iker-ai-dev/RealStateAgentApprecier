@@ -1,0 +1,10 @@
+property_id,comp_name,distance_miles,sale_price,cap_rate,price_psf,sale_date
+SC-001,Bell Road Shops,2.7,17300000,0.0675,238,2025-08-15
+SC-001,Cactus Crossing,4.1,22100000,0.0640,252,2026-02-10
+SC-001,Arcadia Service Center,5.8,15800000,0.0610,279,2025-11-21
+SC-002,Pineville Commons,3.2,24200000,0.0660,223,2025-09-18
+SC-002,Providence Shops,6.5,31200000,0.0625,258,2026-04-02
+SC-002,Matthews Village,5.4,28600000,0.0645,241,2026-01-12
+SC-003,Lamar Retail Row,2.1,21400000,0.0550,337,2025-12-05
+SC-003,South Congress Shops,4.4,29800000,0.0525,371,2026-05-16
+SC-003,Zilker Service Plaza,3.8,19600000,0.0570,322,2025-10-30
