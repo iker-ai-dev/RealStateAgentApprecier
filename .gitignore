@@ -9,3 +9,6 @@ __pycache__/
 *.log
 *.pem
 *.key
+*.egg-info/
+build/
+/sites/

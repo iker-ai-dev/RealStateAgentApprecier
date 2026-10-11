@@ -1,4 +1,4 @@
-RetailScope AI — proposed integration, not a production deployment
+RetailScope AI — integrated hackathon build; live deployment pending
 
 Preserves the partner's chat-left / preview-right layout and existing property tabs.
 Adds explicit Nimble MCP search for a chosen public market or a nationwide growth query.
@@ -49,10 +49,14 @@ Keep personal-account credentials out of this repository and deployment.
 Configure managed NIMBLE_API_KEY and SENTRY_DSN aliases through the deployment owner's
 approved private setup. Warehouse integration never falls back to local personal credentials.
 External access must explicitly allow mcp.nimbleway.com and the deployment's approved
-Sentry ingest host. No account grants/secret transfers/cloud writes have been performed.
+Sentry ingest host. The deployment username and private key are prepared in GitHub
+Actions secrets. A Snowflake administrator must register the service user/public
+key and confirm the warehouse; those account operations remain pending.
 Verify dependency resolution, Cortex model/role access, bounded table loads, a live
 Nimble canary and a sanitized Sentry event/trace in the target runtime before deployment.
 
 Review status:
-Builder offline tests and supplemental Sol checks do not satisfy independent review.
-Fresh cross-provider review of this exact change remains OPEN. Draft PR only; no merge/deploy.
+A subagent reviewed PR #1 and identified incomplete Snowflake packaging and silent
+MCP demo fallback after live-data errors. Both were fixed and re-reviewed.
+All 47 offline checks and all four tools over a real stdio MCP session pass.
+PR #1 was merged on 2026-10-11. Live target-runtime checks remain open.
