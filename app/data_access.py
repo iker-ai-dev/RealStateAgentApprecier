@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from pathlib import Path
 from typing import Any
 
@@ -83,7 +84,23 @@ def get_snowflake_config() -> dict[str, Any]:
     except Exception:
         connection_cfg = {}
 
-    return {**connection_cfg, **app_cfg}
+    env_cfg = {
+        "account": os.getenv("SNOWFLAKE_ACCOUNT"),
+        "user": os.getenv("SNOWFLAKE_USER"),
+        "password": os.getenv("SNOWFLAKE_PASSWORD"),
+        "role": os.getenv("SNOWFLAKE_ROLE"),
+        "warehouse": os.getenv("SNOWFLAKE_WAREHOUSE"),
+        "database": os.getenv("SNOWFLAKE_DATABASE"),
+        "schema": os.getenv("SNOWFLAKE_SCHEMA"),
+        "property_table": os.getenv("SNOWFLAKE_PROPERTY_TABLE"),
+        "tenant_table": os.getenv("SNOWFLAKE_TENANT_TABLE"),
+        "market_table": os.getenv("SNOWFLAKE_MARKET_TABLE"),
+        "sales_comp_table": os.getenv("SNOWFLAKE_SALES_COMP_TABLE"),
+        "cortex_model": os.getenv("SNOWFLAKE_CORTEX_MODEL"),
+    }
+    env_cfg = {key: value for key, value in env_cfg.items() if value}
+
+    return {**connection_cfg, **app_cfg, **env_cfg}
 
 
 def get_snowpark_session(cfg: dict[str, Any] | None = None):
