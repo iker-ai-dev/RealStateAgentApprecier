@@ -39,9 +39,6 @@ def load_dataset() -> PropertyDataset:
 def _try_load_snowflake() -> PropertyDataset | None:
     cfg = get_snowflake_config()
 
-    if not cfg:
-        return None
-
     try:
         session = get_snowpark_session(cfg)
         tables = {
@@ -52,10 +49,12 @@ def _try_load_snowflake() -> PropertyDataset | None:
         }
 
         data = {
-            name: _normalize_columns(session.table(table_name).to_pandas())
+            name: _normalize_columns(session.table(table_name).limit(10001).to_pandas())
             for name, table_name in tables.items()
         }
 
+        if any(len(frame) > 10000 for frame in data.values()):
+            raise ValueError("Dataset exceeds bounded demo load.")
         if "lease_end" in data["tenants"].columns:
             data["tenants"]["lease_end"] = pd.to_datetime(data["tenants"]["lease_end"])
         if "sale_date" in data["sales_comps"].columns:
@@ -69,7 +68,7 @@ def _try_load_snowflake() -> PropertyDataset | None:
             source="Snowflake",
         )
     except Exception as exc:
-        st.warning(f"Snowflake data could not be loaded; using sample data. Details: {exc}")
+        st.warning("Snowflake data could not be loaded; explicitly using synthetic sample data.")
         return None
 
 
