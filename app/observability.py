@@ -40,6 +40,7 @@ TRANSACTIONS = {
     "retailscope_ai.mcp.list_centers": "mcp.server",
     "retailscope_ai.mcp.get_context": "mcp.server",
     "retailscope_ai.mcp.appraise": "mcp.server",
+    "retailscope_ai.mcp.ask": "mcp.server",
     "retailscope_ai.discovery": "agent.discovery",
     "retailscope_ai.discovery_source": "agent.discovery_source",
 }

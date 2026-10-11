@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 import streamlit as st
 
 from nimble_mcp import NimbleMCP
-from app.observability import capture_exception, start_span, start_agent_transaction
+from app.observability import start_span, start_agent_transaction
 
 
 def _nimble_key():
@@ -48,9 +48,8 @@ def render_research(market):
                             result = client.search(question)
                     st.session_state.nimble_evidence = {"query": question, "market": market,
                         "retrieved_at": datetime.now(timezone.utc).isoformat(), "status": "DISCOVERY_ONLY", "result": result}
-                except Exception as error:
+                except Exception:
                     st.session_state.pop("nimble_evidence", None)
-                    capture_exception(error)
                     st.warning("Public research could not complete. Check integration configuration and retry explicitly.")
         evidence = st.session_state.get("nimble_evidence")
         if evidence and evidence["market"] == market:

@@ -49,7 +49,8 @@ def appraise_shopping_center(property_id: str) -> dict[str, Any]:
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=False))
 def ask_retailscope(property_id: str, question: str) -> dict[str, Any]:
     """Ask the RetailScope AI agent an underwriting question about one center."""
-    return ask_property_agent(property_id, question)
+    with start_agent_transaction("retailscope_ai.mcp.ask"):
+        return ask_property_agent(property_id, question, track_answer=False)
 
 
 def main() -> None:

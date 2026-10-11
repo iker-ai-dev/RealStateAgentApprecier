@@ -55,10 +55,11 @@ def appraise_property(property_id: str) -> dict[str, Any]:
     }
 
 
-def ask_property_agent(property_id: str, question: str) -> dict[str, Any]:
+def ask_property_agent(property_id: str, question: str, *, track_answer: bool = True) -> dict[str, Any]:
     dataset, property_row, tenants, market, comps, valuation = load_property_analysis(property_id)
     set_agent_context(str(property_row["property_id"]), str(property_row["name"]), dataset.source)
-    answer = answer_agent(question, property_row, tenants, market, comps, valuation)
+    answer = answer_agent(question, property_row, tenants, market, comps, valuation,
+                          track_workflow=track_answer)
     return {
         "property_id": property_id,
         "property_name": str(property_row["name"]),
