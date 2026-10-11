@@ -6,6 +6,8 @@ This branch is a draft integration. See [INTEGRATION_STATUS.txt](INTEGRATION_STA
 
 [User manual](https://retailscope-user-manual.starryharp64.chatgpt.site) covers deal discovery, center analysis, MCP installation, public research, Snowflake connections, deployment, Sentry, and troubleshooting. The Sites manual currently has owner-private access.
 
+[Demo video](https://www.loom.com/share/a2f8d24da7614c4692d73b44859062b6) shows the local hackathon build.
+
 RetailScope AI is a Streamlit app for exploring acquisition value on open-air commercial shopping centers. It pairs a chat UI with a right-side preview panel, bounded public-evidence discovery, illustrative valuation and a needs-diligence gate.
 
 The default **Find deals** screen filters public listing leads by market, advertised price, reported vacancy, source and sourced income coverage. The initial seven records are broker assertions with unknown current availability, including one historical listing requiring an availability recheck. They are research leads, not qualified investments. Occupancy basis, vacancy hypotheses, counterevidence and missing documents are visible. County demographics are shown separately from property trade areas; future income is unknown.
