@@ -21,6 +21,31 @@ pip install -r requirements.txt
 streamlit run streamlit_app.py
 ```
 
+## MCP Server
+
+The MCP install page is available at `/landing` (locally, `http://localhost:8501/landing`). It includes copyable commands for Codex, Claude Code, OpenCode, and a generic MCP JSON configuration.
+
+RetailScope AI can also run as a local stdio MCP server for coding agents:
+
+```bash
+uvx --from git+https://github.com/iker-ai-dev/RealStateAgentApprecier.git retailscope-mcp
+```
+
+Agent install commands:
+
+```bash
+codex mcp add retailscope-ai -- uvx --from git+https://github.com/iker-ai-dev/RealStateAgentApprecier.git retailscope-mcp
+claude mcp add retailscope-ai -- uvx --from git+https://github.com/iker-ai-dev/RealStateAgentApprecier.git retailscope-mcp
+opencode mcp add retailscope-ai -- uvx --from git+https://github.com/iker-ai-dev/RealStateAgentApprecier.git retailscope-mcp
+```
+
+The server exposes:
+
+- `list_shopping_centers`
+- `get_shopping_center_context`
+- `appraise_shopping_center`
+- `ask_retailscope`
+
 ## Snowflake Setup
 
 For local Snowflake access, create `.streamlit/secrets.toml`. The app supports the Snowflake tutorial's `[connections.snowflake]` convention plus app-specific table/model settings under `[snowflake]`:
@@ -91,6 +116,30 @@ Sentry uses static operation names, generated trace IDs, timing and fixed status
 This repository includes a `Dockerfile` and `render.yaml` for container-based deployment.
 
 For Streamlit in Snowflake deployment, use `snowflake_streamlit_app.py` as the entrypoint and upload the complete repository modules. It uses active Snowpark session data when the expected tables exist and falls back to embedded demo data otherwise.
+
+## CI/CD Deployment
+
+`.github/workflows/deploy-snowflake.yml` runs compile and data-path smoke tests on pull requests. When changes land on `main`, it uses Snowflake CLI to deploy `snowflake_streamlit_app.py` with `snow streamlit deploy`.
+
+Configure these GitHub Actions secrets before relying on automatic deployment:
+
+- `SNOWFLAKE_ACCOUNT`
+- `SNOWFLAKE_USER`
+- `SNOWFLAKE_PRIVATE_KEY` (PKCS#8 PEM registered on the Snowflake user), or `SNOWFLAKE_PASSWORD`
+- `SNOWFLAKE_ROLE`
+- `SNOWFLAKE_WAREHOUSE`
+- `SNOWFLAKE_DATABASE`
+- `SNOWFLAKE_SCHEMA`
+
+The Snowflake project definition lives in `snowflake.yml`.
+
+For unattended deployment, prefer a dedicated Snowflake service user with key-pair authentication. Store its private key only in GitHub Actions secrets. The workflow writes the key to a restricted temporary file and removes it after each command. Password authentication remains available for accounts that allow it without an interactive MFA challenge.
+
+The prepared service username is `RETAILSCOPE_DEPLOY`. An administrator must run `deploy/bootstrap_snowflake_user.sql` in Snowflake to create it and register its public key. The private key is stored separately from the repository. Confirm the existing warehouse and configure `SNOWFLAKE_WAREHOUSE` in GitHub before enabling deployment. The script reuses the existing deployment role; it does not transfer app ownership or create compute.
+
+MCP installation itself requires no credentials and initially uses bundled demo data. To query your Snowflake tables, configure the `SNOWFLAKE_*` connection variables on the machine running the MCP server. GitHub deployment secrets are not passed to installed MCP clients.
+
+For local key-pair access, set `SNOWFLAKE_AUTHENTICATOR=SNOWFLAKE_JWT` and `SNOWFLAKE_PRIVATE_KEY_FILE` to the private key path along with your connection settings. Configured MCP clients fail with a loading error instead of receiving synthetic data when Snowflake is unavailable or a table exceeds the bounded load. `RETAILSCOPE_REQUIRE_SNOWFLAKE=true` explicitly disables demo fallback for MCP.
 
 ## What The Agent Does
 

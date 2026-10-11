@@ -25,14 +25,16 @@ class PolicyTests(unittest.TestCase):
         self.m = pd.read_csv(ROOT/'app/data/markets.csv').iloc[0]
         self.c = pd.read_csv(ROOT/'app/data/sales_comps.csv')
         self.c = self.c[self.c.property_id == self.p.property_id]
-        self.network = patch('socket.socket', side_effect=AssertionError('No network in tests'))
-        self.network.start()
+        # Keep asyncio's local socketpair available while blocking outbound connections.
+        for target in ('socket.create_connection', 'socket.socket.connect', 'socket.socket.connect_ex'):
+            guard = patch(target, side_effect=AssertionError('No network in tests'))
+            guard.start()
+            self.addCleanup(guard.stop)
         self.env = patch.dict(os.environ, {}, clear=True)
         self.env.start()
 
     def tearDown(self):
         self.env.stop()
-        self.network.stop()
 
     def test_large_value_spread_never_becomes_acquire(self):
         self.p['asking_price'] = 1_000_000
