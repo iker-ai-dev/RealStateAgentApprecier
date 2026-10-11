@@ -1,0 +1,151 @@
+RETAILSCOPE AI — CURRENT SOURCE ADAPTER CONTRACT v1
+Source snapshot: partner-current-014. This is source analysis and a proposed
+integration boundary; the running Snowflake deployment has not been verified.
+
+Preserve the two-column chat/preview, center selector and Model/Rent Roll/Market/
+Comps tabs. Insert a validated context adapter at loading, valuation and prompt
+boundaries. Do not replace the UI with the supplemental standalone prototype.
+
+Actual entrypoints and data interface
+snowflake_streamlit_app.py: main -> load_data -> get_active_session -> four bare
+SHOPPING_CENTER_* names, normalize columns, to_pandas; any loading exception is
+silently swallowed and the whole dataset is replaced with embedded demo rows.
+The file contains no Sentry imports, init call, scrubber or tracing wrappers.
+streamlit_app.py: initializes app.observability then loads PropertyDataset via
+app/data_access.py. The dataclass holds properties/tenants/markets/sales_comps
+DataFrames and a source string. Config supports table names, but no config means
+the active session is not attempted. The loader merges connection settings with
+environment variables, which currently take precedence even over app settings.
+Do not let a personal environment configuration redirect a verified team runtime.
+Configured load errors display raw exception details and switch to sample CSVs.
+Neither loader validates the four dataset schemas/relationships/provenance,
+bounds row counts, or distinguishes source quality within a Snowflake dataset.
+
+Compatibility output columns (keep existing widgets and explicit unknowns)
+properties: property_id, name, address, city, state, gla_sf, year_built,
+occupancy_pct, asking_price, notes.
+tenants: property_id, tenant, category, suite, area_sf, rent_psf, lease_end,
+credit, sales_psf.
+markets: property_id, trade_area_miles, population, median_income,
+growth_5yr_pct, traffic_count, median_age.
+sales_comps: property_id, comp_name, distance_miles, sale_price, cap_rate,
+price_psf, sale_date.
+Keep an accompanying canonical context, evidence map, input fingerprint, mode,
+coverage and missing-input list. Adding columns to four frames is insufficient:
+the current prompt sends all rows without source metadata, and the current numeric
+renderers cannot format nulls safely. Patch only those boundary/formatting paths.
+Snowflake unquoted column names and OBJECT_CONSTRUCT_KEEP_NULL(*) record keys are
+uppercase. Normalize only the outer record keys to the canonical lowercase names
+before validation; preserve nested field_evidence/units keys, source text and IDs.
+Convert DATE/TIMESTAMP to exact ISO date/time-zone forms and SQL NULL/pandas NA/NaT
+to JSON null. Reject nonfinite values and excess six-place NUMBER(24,6) precision;
+do not use json.dumps(default=str) to turn financial numbers into unknown strings
+or permit NaN. Decimal-to-JSON precision needs an explicit serializer round-trip
+test before production ingestion. The scratch JSON fixture uses ordinary supported
+numbers; it does not certify a Snowpark Decimal/OBJECT round trip.
+Unknown values display "Unknown"; do not fill nulls with zeros, known demo values
+or pandas NaN and then run existing numerical routines.
+
+Precise canonical mappings
+PROPERTY.property_name -> name; area_sf -> gla_sf only when area_kind=GLA.
+PROPERTY.advertised_occupancy_pct -> occupancy_pct only with an "advertised"
+source label; it is separate from coverage-reconciled rent-roll occupancy.
+PROPERTY.asking_price_usd -> asking_price only if asking_price_status=asking.
+Price within the public screen is a listing filter ($1–10m), not a closed basis.
+Canonical property city/state/year_built/notes are nullable; do not infer them from
+an arbitrary string. Positive area and asking price still require field provenance.
+Join one selected RENT_ROLL_SNAPSHOT with LEASE and TENANT for tenant frames.
+Select explicit snapshot_id and matching property/unit/lease. TENANT.public_name
+and industry map to tenant/category; LEASE.unit_id -> suite, leased_sf -> area_sf,
+end_date -> lease_end. Vacant units come from the selected snapshot, not invented
+tenant names or leases. LEASE.rent_value maps directly to rent_psf only for
+USD/SF/year; USD/SF/month needs an explicit 12x transform and derived provenance.
+Other rent units need evidenced area/period before conversion. Preserve rent
+basis and rent kind in the sidecar and preview label. UNKNOWN basis disables the
+NOI/in-place comparison; asking rent cannot masquerade as an executed lease.
+Do not infer credit quality from "National", a brand, or an industry category.
+credit and sales_psf remain null unless separately sourced and authorized; their
+absence must not create an assumed investment-grade tenant or sales productivity.
+MARKET_FACT population and median_household_income map only from the same exact
+defined trade-area boundary/vintage/observed period. County-level numbers remain
+county numbers; do not label them "3-mile trade area". trade_area_miles is null
+until an actual radius/polygon/center specification is evidenced. growth_5yr_pct
+requires a defined population/household/income metric and exact five-year period,
+or a named scenario; generic growth is not silently treated as household growth.
+traffic_count and median_age remain null if no compatible observation exists;
+the initial canonical metric list does not yet supply them. A missing market row
+is a missing context, not permission to pull a different property's market.
+COMP sale rows map comp_name, distance_miles, sale_price_usd and event_date to
+their existing columns only for the explicitly selected subject_property_id.
+reported_cap_pct -> cap_rate divides by 100 because the existing model uses a
+fraction (0.065 means 6.5%). reported_price_per_sf -> price_psf preserves USD/SF.
+Closed/asking/unknown status, source dates, price basis and NOI kind remain in
+context. Closed-sale valuation excludes asking/unverified/unsupported rows;
+with insufficient valid comps, comp-derived output stays null. No nearest-comp
+distance or market cap is inferred from a tax record or a listing headline.
+
+Minimal hackathon implementation sequence
+1. Keep the four current DataFrame interface shapes and existing demo data, but
+   tag every bundled row/demo scenario and require an explicit mode. Loading a
+   configured live dataset must fail visibly and retain the prior draft as stale
+   rather than silently change to demo. Never mix real evidence and demo rows.
+2. Add an EVIDENCE sidecar and one UNDERWRITING_SCENARIO store first, with fixed
+   adapter reads and offline validation. The nine-table DDL is the canonical
+   normalized destination, not a requirement to build nine cloud tables before
+   a credible public-data demo. The first market screen/one-center workflow can
+   run from bounded validated JSON in memory without cloud writes.
+3. Normalize lease/rent-roll/T12/comp/market rows only as corresponding public
+   evidence actually exists. Preserve the other domains as unknown. Do not
+   migrate/replace the four existing SHOPPING_CENTER_* objects or change grants
+   until their owner confirms the exact deployed namespace and data contract.
+4. Add a pure deterministic scenario tool for 5/7/10-year equity cashflows and
+   dated equity IRR with sale. Independently test every cashflow, extra equity
+   contribution, refinance debt, exit payoff and cost. The scratch contract
+   implements equity-multiple checks only; IRR/DCF integration remains work.
+
+Actual valuation limitations and source disagreement
+Both current engines synthesize NOI from 22% rent reimbursements, 31% expenses,
+at least 2% vacancy loss and heuristic rent/cap adjustments. No T12 supports
+those percentages. The modular lease-up multiplies vacant-area rent by 0.88 then
+0.62; the single-file uses 0.62 only, producing different stabilized NOI/values
+from identical inputs. Both fix 10-year unlevered NOI DCF at 2.75% annual growth,
+discount cap+2.1%, terminal NOI+2%, exit cap+0.25% floor4.5%. Neither has purchase
+equity, debt, TI/LC/capex/negative carry, sale costs, refinance, dated IRR, LP
+fees/promote, or 5/7-year choices. The blended valuation spread versus asking
+price is not an equity multiple or an IRR. Recommendations such as "Acquire"
+cannot be carried into real-data mode without a completeness/target gate.
+Replace hardcoded assumptions with explicit scenario inputs or show them as
+illustrative demo assumptions. Use the same canonical deterministic engine for
+both entrypoints, and make local fallback copy the same validated outputs and
+source limits. Preserve any source conflict rather than selecting favorable data.
+
+Actual modular Sentry privacy defects (offline reproduced)
+The exact-key blacklist filters prompt/question/messages/tenant keys but leaves
+request.data, exception value strings, arbitrary stack-frame locals, property/AI
+contexts, breadcrumbs, arbitrary raw_result keys and attachment hints intact.
+init_sentry registers before_send but no before_send_transaction. Actual SDK
+2.71.0 with a memory-only transport captured synthetic sensitive markers in both
+an error event and transaction. The production helper also writes property IDs
+and names into tags/context. ai_track is conditional on SDK capabilities; its
+real automatic capture behavior was not certified. The current README claim
+that raw prompts/tenant rows/secrets are filtered is broader than the proven hook.
+Adopt the already-tested supplemental telemetry static allowlists, before_send
+and before_send_transaction, no local vars/breadcrumbs/attachments/AI inputs or
+outputs/property context, no arbitrary exceptions or raw source/row/prompt data.
+Use fixed operation names and static error receipts; private named secrets stay
+private. A wrapper must initialize explicitly in the actual Snowflake entrypoint.
+Existing deployment egress/SDK package support needs its own controlled canary;
+an offline envelope proof is not remote receipt or deployment certification.
+
+Confirmed screening policy
+At $1–10m asking price, identify public USA open-air centers with evidenced
+partial vacancy/stable tenancy context. Unknown tenant economics remains unknown.
+Compare 5/7/10-year scenarios for 20%+ annualized equity IRR including sale, plus
+6–7x total cash returned / all invested equity, including return of capital and
+all future contributions. Show operating cash-on-cash separately. Gross equity
+versus net LP, debt, fees/promote and dated cashflows still need explicit inputs.
+No target is promised achievable from listing evidence or an illustrative model.
+
+No firm references, personal investment knowledge, account identifiers, keys,
+DSNs, or local machine paths belong in the app, targets, source contract or public
+artifacts. Production edits and deployed behavior remain the coordinator's scope.

@@ -3,7 +3,7 @@ services:
     name: retailscope-ai
     env: docker
     plan: starter
-    autoDeploy: true
+    autoDeploy: false
     healthCheckPath: /
     envVars:
       - key: SENTRY_DSN
@@ -27,4 +27,4 @@ services:
       - key: SNOWFLAKE_SCHEMA
         sync: false
       - key: SNOWFLAKE_CORTEX_MODEL
-        value: claude-sonnet-5
+        sync: false
