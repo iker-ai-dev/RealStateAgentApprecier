@@ -44,9 +44,11 @@ class MCPIntegrationTests(unittest.TestCase):
                     app.run()
                     self.assertEqual(len(app.exception), 0)
                     commands = "\n".join(x.value for x in app.code)
-                    for client in ("codex", "claude", "opencode"):
+                    for client in ("codex", "claude"):
                         self.assertIn(client + " mcp add", commands)
                     self.assertIn('"mcpServers"', commands)
+                    self.assertIn('"type": "remote"', commands)
+                    self.assertIn("https://retailscope-ai-demo.onrender.com/mcp", commands)
 
 
 if __name__ == "__main__":

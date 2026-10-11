@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-import json
-import os
-
 import altair as alt
 import pandas as pd
 import streamlit as st
@@ -13,6 +10,7 @@ from app.deal_radar_ui import render_deal_radar
 from app.presentation import apply_presentation, navigation, render_analysis_header, render_analysis_mode
 from app.data_access import load_dataset, get_snowflake_config
 from app.observability import init_sentry, set_agent_context, start_span
+from app.mcp_install import PUBLIC_MCP_URL, remote_install_commands
 from app.services.cortex import answer_agent
 from app.services.valuation import ValuationResult, build_valuation
 
@@ -287,20 +285,6 @@ def _money(value: float) -> str:
 
 
 def _render_mcp_install_page() -> None:
-    repo_url = os.getenv(
-        "RETAILSCOPE_REPO_URL",
-        "https://github.com/iker-ai-dev/RealStateAgentApprecier.git",
-    )
-    server_command = f"uvx --from git+{repo_url} retailscope-mcp"
-    args = ["--from", f"git+{repo_url}", "retailscope-mcp"]
-    generic_config = {
-        "mcpServers": {
-            "retailscope-ai": {
-                "command": "uvx",
-                "args": args,
-            }
-        }
-    }
 
     st.markdown(
         """
@@ -327,22 +311,17 @@ def _render_mcp_install_page() -> None:
             - `ask_retailscope`
             """
         )
-        st.markdown('<div class="section-label">Server command</div>', unsafe_allow_html=True)
-        st.code(server_command, language="bash")
-        st.caption("Requires `uv`/`uvx` on the agent machine. The MCP server runs over stdio.")
+        st.markdown('<div class="section-label">Public MCP endpoint</div>', unsafe_allow_html=True)
+        st.code(PUBLIC_MCP_URL, language="text")
+        st.caption("Public demo data only. Deterministic answers; no live LLM inference or private Snowflake data.")
 
     with right:
         st.subheader("Copy-Paste Install")
-        commands = {
-            "Codex": f"codex mcp add retailscope-ai -- {server_command}",
-            "Claude Code": f"claude mcp add retailscope-ai -- {server_command}",
-            "OpenCode": f"opencode mcp add retailscope-ai -- {server_command}",
-            "Generic JSON": json.dumps(generic_config, indent=2),
-        }
+        commands = remote_install_commands()
         tabs = st.tabs(list(commands.keys()))
         for tab, (label, command) in zip(tabs, commands.items()):
             with tab:
-                language = "json" if label == "Generic JSON" else "bash"
+                language = "json" if label in {"Generic JSON", "OpenCode"} else "bash"
                 st.markdown(f'<div class="copy-label">{label}</div>', unsafe_allow_html=True)
                 st.code(command, language=language)
 

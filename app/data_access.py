@@ -23,9 +23,13 @@ class PropertyDataset:
 
 def load_dataset(*, require_snowflake: bool = False) -> PropertyDataset:
     """Load Snowflake data when configured, otherwise use bundled sample data."""
-    snowflake_data = _try_load_snowflake(require_snowflake=require_snowflake)
-    if snowflake_data is not None:
-        return snowflake_data
+    public_demo = os.getenv("RETAILSCOPE_PUBLIC_DEMO") == "true"
+    if public_demo and require_snowflake:
+        raise RuntimeError("Public demo cannot access Snowflake data.")
+    if not public_demo:
+        snowflake_data = _try_load_snowflake(require_snowflake=require_snowflake)
+        if snowflake_data is not None:
+            return snowflake_data
 
     return PropertyDataset(
         properties=pd.read_csv(DATA_DIR / "properties.csv"),
@@ -78,6 +82,8 @@ def _try_load_snowflake(*, require_snowflake: bool = False) -> PropertyDataset |
 
 
 def get_snowflake_config() -> dict[str, Any]:
+    if os.getenv("RETAILSCOPE_PUBLIC_DEMO") == "true":
+        return {}
     try:
         app_cfg = dict(st.secrets.get("snowflake", {}))
     except Exception:
