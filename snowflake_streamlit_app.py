@@ -1,11 +1,19 @@
 from __future__ import annotations
 
 import json
+import os
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date
+from typing import Any, Iterator
 
 import pandas as pd
 import streamlit as st
+
+try:
+    import sentry_sdk
+except Exception:  # pragma: no cover - optional Snowflake package
+    sentry_sdk = None
 
 
 PROPERTY_ROWS = [
@@ -110,6 +118,8 @@ class ValuationResult:
 
 st.set_page_config(page_title="RetailScope AI", page_icon="RS", layout="wide")
 
+SENTRY_ENABLED = False
+
 
 CSS = """
 <style>
@@ -125,9 +135,123 @@ CSS = """
 """
 
 
+def init_sentry() -> bool:
+    if sentry_sdk is None:
+        return False
+    if sentry_sdk.is_initialized():
+        return True
+
+    dsn = get_sentry_dsn()
+    if not dsn:
+        return False
+
+    sentry_sdk.init(
+        dsn=dsn,
+        environment=get_config_value("SENTRY_ENVIRONMENT", "snowflake"),
+        release=get_config_value("SENTRY_RELEASE", None),
+        traces_sample_rate=float(get_config_value("SENTRY_TRACES_SAMPLE_RATE", "0.2")),
+        profiles_sample_rate=float(get_config_value("SENTRY_PROFILES_SAMPLE_RATE", "0.0")),
+        send_default_pii=False,
+        before_send=scrub_event,
+    )
+    return True
+
+
+def get_sentry_dsn() -> str | None:
+    value = get_config_value("SENTRY_DSN", None)
+    if value:
+        return value
+
+    try:
+        from _snowflake import get_generic_secret_string
+
+        return get_generic_secret_string("SENTRY_DSN")
+    except Exception:
+        return None
+
+
+def get_config_value(name: str, default: str | None) -> str | None:
+    if os.getenv(name):
+        return os.getenv(name)
+    try:
+        value = st.secrets.get(name)
+        if value:
+            return str(value)
+    except Exception:
+        pass
+    try:
+        sentry_config = st.secrets.get("sentry", {})
+        key = name.removeprefix("SENTRY_").lower()
+        if key in sentry_config:
+            return str(sentry_config[key])
+    except Exception:
+        pass
+    return default
+
+
+def set_agent_context(property_id: str, property_name: str, data_source: str) -> None:
+    if sentry_sdk is None or not sentry_sdk.is_initialized():
+        return
+    sentry_sdk.set_tag("agent.kind", "retailscope-ai")
+    sentry_sdk.set_tag("property.id", property_id)
+    sentry_sdk.set_tag("data.source", data_source)
+    sentry_sdk.set_context(
+        "property",
+        {"id": property_id, "name": property_name, "data_source": data_source},
+    )
+
+
+@contextmanager
+def start_span(op: str, name: str, data: dict[str, Any] | None = None) -> Iterator[Any]:
+    if sentry_sdk is None or not sentry_sdk.is_initialized():
+        yield None
+        return
+    with sentry_sdk.start_span(op=op, name=name) as span:
+        if data:
+            for key, value in data.items():
+                span.set_data(key, value)
+        yield span
+
+
+@contextmanager
+def start_agent_transaction(name: str, data: dict[str, Any] | None = None) -> Iterator[Any]:
+    if sentry_sdk is None or not sentry_sdk.is_initialized():
+        yield None
+        return
+    with sentry_sdk.start_transaction(op="ai.pipeline", name=name) as transaction:
+        if data:
+            for key, value in data.items():
+                transaction.set_data(key, value)
+        yield transaction
+
+
+def capture_exception(exc: Exception) -> None:
+    if sentry_sdk is not None and sentry_sdk.is_initialized():
+        sentry_sdk.capture_exception(exc)
+
+
+def scrub_event(event: dict[str, Any], hint: dict[str, Any]) -> dict[str, Any]:
+    return scrub_value(event)
+
+
+def scrub_value(value: Any) -> Any:
+    sensitive = {"password", "token", "secret", "dsn", "authorization", "cookie", "question", "prompt", "messages", "tenant", "tenants"}
+    if isinstance(value, dict):
+        return {
+            key: "[Filtered]" if str(key).lower() in sensitive else scrub_value(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [scrub_value(item) for item in value]
+    return value
+
+
 def main() -> None:
+    global SENTRY_ENABLED
+    SENTRY_ENABLED = init_sentry()
     st.markdown(CSS, unsafe_allow_html=True)
-    properties, tenants_all, markets, comps_all, source = load_data()
+    with start_span("db.load", "Load shopping center dataset"):
+        properties, tenants_all, markets, comps_all, source = load_data()
 
     options = {
         f"{row.name} · {row.city}, {row.state}": row.property_id
@@ -149,7 +273,9 @@ def main() -> None:
     tenants = tenants_all.loc[tenants_all["property_id"] == selected_id].copy()
     market = markets.loc[markets["property_id"] == selected_id].iloc[0]
     comps = comps_all.loc[comps_all["property_id"] == selected_id].copy()
-    valuation = build_valuation(property_row, tenants, market, comps)
+    set_agent_context(str(property_row["property_id"]), str(property_row["name"]), source)
+    with start_span("app.valuation", "Build commercial real estate valuation", {"property_id": str(property_row["property_id"])}):
+        valuation = build_valuation(property_row, tenants, market, comps)
 
     if st.session_state.get("active_property_id") != selected_id:
         st.session_state.active_property_id = selected_id
@@ -237,11 +363,20 @@ def render_chat(property_row, tenants, market, comps, valuation) -> None:
 
 def submit_question(question, property_row, tenants, market, comps, valuation) -> None:
     st.session_state.messages.append({"role": "user", "content": question})
-    with st.status("Underwriting the answer...", expanded=True) as status:
-        st.write("Reading property, rent roll, trade area, and comps.")
-        st.write("Running Cortex or local underwriting fallback.")
-        answer = answer_agent(question, property_row, tenants, market, comps, valuation)
-        status.update(label="Answer ready", state="complete", expanded=False)
+    with start_agent_transaction(
+        "retailscope_ai.answer",
+        {
+            "property_id": str(property_row["property_id"]),
+            "question_length": len(question),
+            "tenant_count": int(len(tenants)),
+            "comp_count": int(len(comps)),
+        },
+    ):
+        with st.status("Underwriting the answer...", expanded=True) as status:
+            st.write("Reading property, rent roll, trade area, and comps.")
+            st.write("Running Cortex or local underwriting fallback.")
+            answer = answer_agent(question, property_row, tenants, market, comps, valuation)
+            status.update(label="Answer ready", state="complete", expanded=False)
     st.session_state.messages.append({"role": "assistant", "content": answer})
 
 
@@ -294,24 +429,32 @@ def answer_agent(question, property_row, tenants, market, comps, valuation) -> s
         try:
             from snowflake.snowpark.functions import ai_complete
 
-            payload = {
-                "question": question,
-                "property": series_dict(property_row),
-                "tenants": records(tenants),
-                "market": series_dict(market),
-                "sales_comps": records(comps),
-                "valuation": valuation.__dict__,
-            }
-            prompt = (
-                "You are an institutional commercial real estate acquisition analyst. "
-                "Use only the provided data. Be concise and cite metrics behind conclusions.\n\n"
-                f"{json.dumps(payload, default=str)}"
-            )
-            response = session.range(1).select(ai_complete("claude-sonnet-5", prompt).alias("response")).collect()[0][0]
+            with start_span("ai.prompt.build", "Build appraisal prompt"):
+                payload = {
+                    "question": question,
+                    "property": series_dict(property_row),
+                    "tenants": records(tenants),
+                    "market": series_dict(market),
+                    "sales_comps": records(comps),
+                    "valuation": valuation.__dict__,
+                }
+                prompt = (
+                    "You are an institutional commercial real estate acquisition analyst. "
+                    "Use only the provided data. Be concise and cite metrics behind conclusions.\n\n"
+                    f"{json.dumps(payload, default=str)}"
+                )
+            with start_span(
+                "ai.chat_completions.create.snowflake_cortex",
+                "Snowflake Cortex ai_complete",
+                {"model": "claude-sonnet-5", "provider": "snowflake_cortex"},
+            ):
+                response = session.range(1).select(ai_complete("claude-sonnet-5", prompt).alias("response")).collect()[0][0]
             return extract_text(response)
         except Exception as exc:
+            capture_exception(exc)
             st.caption(f"Cortex unavailable; using deterministic local analyst. Details: {exc}")
-    return answer_locally(question, property_row, tenants, market, comps, valuation)
+    with start_span("ai.fallback", "Deterministic local appraisal answer", {"reason": "cortex_unavailable_or_unconfigured"}):
+        return answer_locally(question, property_row, tenants, market, comps, valuation)
 
 
 def answer_locally(question, property_row, tenants, market, comps, valuation) -> str:
