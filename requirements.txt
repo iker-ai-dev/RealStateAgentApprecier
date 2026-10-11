@@ -1,4 +1,5 @@
 altair>=5.3
+mcp>=1.16,<2
 pandas>=2.2
 sentry-sdk>=2.22
 snowflake-connector-python>=3.12

@@ -13,6 +13,29 @@ pip install -r requirements.txt
 streamlit run streamlit_app.py
 ```
 
+## MCP Server
+
+RetailScope AI can also run as a local stdio MCP server for coding agents:
+
+```bash
+uvx --from git+https://github.com/iker-ai-dev/RealStateAgentApprecier.git retailscope-mcp
+```
+
+Agent install commands:
+
+```bash
+codex mcp add retailscope-ai -- uvx --from git+https://github.com/iker-ai-dev/RealStateAgentApprecier.git retailscope-mcp
+claude mcp add retailscope-ai -- uvx --from git+https://github.com/iker-ai-dev/RealStateAgentApprecier.git retailscope-mcp
+opencode mcp add retailscope-ai -- uvx --from git+https://github.com/iker-ai-dev/RealStateAgentApprecier.git retailscope-mcp
+```
+
+The server exposes:
+
+- `list_shopping_centers`
+- `get_shopping_center_context`
+- `appraise_shopping_center`
+- `ask_retailscope`
+
 ## Snowflake Setup
 
 For local Snowflake access, create `.streamlit/secrets.toml`. The app supports the Snowflake tutorial's `[connections.snowflake]` convention plus app-specific table/model settings under `[snowflake]`:
@@ -81,6 +104,22 @@ Sentry spans are emitted for dataset loading, valuation, prompt construction, Co
 This repository includes a `Dockerfile` and `render.yaml` for container-based deployment.
 
 For fast Streamlit in Snowflake deployment, use `snowflake_streamlit_app.py` as a single-file entrypoint. It uses active Snowpark session data when the expected tables exist and falls back to embedded demo data otherwise.
+
+## CI/CD Deployment
+
+`.github/workflows/deploy-snowflake.yml` runs compile and data-path smoke tests on pull requests. When changes land on `main`, it uses Snowflake CLI to deploy `snowflake_streamlit_app.py` with `snow streamlit deploy`.
+
+Configure these GitHub Actions secrets before relying on automatic deployment:
+
+- `SNOWFLAKE_ACCOUNT`
+- `SNOWFLAKE_USER`
+- `SNOWFLAKE_PASSWORD`
+- `SNOWFLAKE_ROLE`
+- `SNOWFLAKE_WAREHOUSE`
+- `SNOWFLAKE_DATABASE`
+- `SNOWFLAKE_SCHEMA`
+
+The Snowflake project definition lives in `snowflake.yml`.
 
 ## What The Agent Does
 

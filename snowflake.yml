@@ -1,0 +1,11 @@
+definition_version: 2
+entities:
+  retailscope_ai:
+    type: streamlit
+    identifier: STREAMLIT_APP
+    title: RetailScope AI
+    stage: RETAILSCOPE_AI_STAGE
+    query_warehouse: DEFAULT_WH
+    main_file: snowflake_streamlit_app.py
+    artifacts:
+      - snowflake_streamlit_app.py

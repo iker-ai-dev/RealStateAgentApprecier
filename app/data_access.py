@@ -69,7 +69,7 @@ def _try_load_snowflake() -> PropertyDataset | None:
             source="Snowflake",
         )
     except Exception as exc:
-        st.warning(f"Snowflake data could not be loaded; using sample data. Details: {exc}")
+        _warn(f"Snowflake data could not be loaded; using sample data. Details: {exc}")
         return None
 
 
@@ -124,3 +124,13 @@ def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df.columns = [str(column).lower() for column in df.columns]
     return df
+
+
+def _warn(message: str) -> None:
+    try:
+        from streamlit.runtime.scriptrunner import get_script_run_ctx
+
+        if get_script_run_ctx() is not None:
+            st.warning(message)
+    except Exception:
+        pass

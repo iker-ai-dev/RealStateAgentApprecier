@@ -131,6 +131,7 @@ CSS = """
 .subtitle { color: #59665f; margin: .35rem 0 1rem; }
 .section-label { color: #43504b; font-size: .78rem; font-weight: 700; margin: 1rem 0 .35rem; text-transform: uppercase; }
 .note { color: #64716c; font-size: .86rem; }
+.copy-label { color: #43504b; font-size: .82rem; font-weight: 700; margin-top: .35rem; text-transform: uppercase; }
 </style>
 """
 
@@ -250,6 +251,16 @@ def main() -> None:
     global SENTRY_ENABLED
     SENTRY_ENABLED = init_sentry()
     st.markdown(CSS, unsafe_allow_html=True)
+    view = st.radio(
+        "View",
+        ["Underwriting Desk", "MCP Install"],
+        horizontal=True,
+        label_visibility="collapsed",
+    )
+    if view == "MCP Install":
+        render_mcp_install_page()
+        return
+
     with start_span("db.load", "Load shopping center dataset"):
         properties, tenants_all, markets, comps_all, source = load_data()
 
@@ -617,6 +628,65 @@ def extract_text(response) -> str:
 
 def money(value) -> str:
     return f"${value:,.0f}"
+
+
+def render_mcp_install_page() -> None:
+    repo_url = os.getenv(
+        "RETAILSCOPE_REPO_URL",
+        "https://github.com/iker-ai-dev/RealStateAgentApprecier.git",
+    )
+    server_command = f"uvx --from git+{repo_url} retailscope-mcp"
+    generic_config = {
+        "mcpServers": {
+            "retailscope-ai": {
+                "command": "uvx",
+                "args": ["--from", f"git+{repo_url}", "retailscope-mcp"],
+            }
+        }
+    }
+
+    st.markdown('<span class="badge">MCP Server</span>', unsafe_allow_html=True)
+    st.title("RetailScope AI")
+    st.markdown(
+        '<div class="subtitle">Install RetailScope AI in your coding agent and query shopping-center rent rolls, market context, comps, valuation outputs, and the appraisal answer layer.</div>',
+        unsafe_allow_html=True,
+    )
+
+    left, right = st.columns([0.48, 0.52], gap="large")
+    with left:
+        st.subheader("Tools")
+        st.markdown(
+            """
+            - `list_shopping_centers`
+            - `get_shopping_center_context`
+            - `appraise_shopping_center`
+            - `ask_retailscope`
+            """
+        )
+        st.markdown('<div class="section-label">Server command</div>', unsafe_allow_html=True)
+        st.code(server_command, language="bash")
+        st.caption("Requires `uv`/`uvx` on the agent machine. The MCP server runs over stdio.")
+
+    with right:
+        st.subheader("Copy-Paste Install")
+        commands = {
+            "Codex": f"codex mcp add retailscope-ai -- {server_command}",
+            "Claude Code": f"claude mcp add retailscope-ai -- {server_command}",
+            "OpenCode": f"opencode mcp add retailscope-ai -- {server_command}",
+            "Generic JSON": json.dumps(generic_config, indent=2),
+        }
+        tabs = st.tabs(list(commands.keys()))
+        for tab, (label, command) in zip(tabs, commands.items()):
+            with tab:
+                language = "json" if label == "Generic JSON" else "bash"
+                st.markdown(f'<div class="copy-label">{label}</div>', unsafe_allow_html=True)
+                st.code(command, language=language)
+
+    st.markdown('<div class="section-label">Example prompt</div>', unsafe_allow_html=True)
+    st.code(
+        "Use RetailScope AI to appraise SC-001 and tell me whether the rent roll supports the asking price.",
+        language="text",
+    )
 
 
 if __name__ == "__main__":
