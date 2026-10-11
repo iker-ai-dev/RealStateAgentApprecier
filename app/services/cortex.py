@@ -54,7 +54,7 @@ def _try_cortex_complete(prompt: str) -> str | None:
     if not cfg:
         return None
 
-    model = cfg.get("cortex_model", "claude-3-5-sonnet")
+    model = cfg.get("cortex_model", "claude-sonnet-5")
     try:
         from snowflake.snowpark.functions import ai_complete
 

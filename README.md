@@ -32,7 +32,7 @@ property_table = "SHOPPING_CENTER_PROPERTIES"
 tenant_table = "SHOPPING_CENTER_TENANTS"
 market_table = "SHOPPING_CENTER_MARKETS"
 sales_comp_table = "SHOPPING_CENTER_SALES_COMPS"
-cortex_model = "claude-3-5-sonnet"
+cortex_model = "claude-sonnet-5"
 ```
 
 The app expects these logical fields:
