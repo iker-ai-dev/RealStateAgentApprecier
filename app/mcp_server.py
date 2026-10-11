@@ -18,7 +18,7 @@ mcp = FastMCP(
     instructions=(
         "Use RetailScope AI tools to inspect shopping-center rent rolls, market "
         "demographics, sales comps, and valuation outputs. Start with "
-        "list_properties when a property_id is unknown. Treat outputs as "
+        "list_shopping_centers when a property_id is unknown. Treat outputs as "
         "decision-support underwriting, not a certified appraisal."
     ),
 )

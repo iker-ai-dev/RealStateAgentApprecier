@@ -113,13 +113,17 @@ Configure these GitHub Actions secrets before relying on automatic deployment:
 
 - `SNOWFLAKE_ACCOUNT`
 - `SNOWFLAKE_USER`
-- `SNOWFLAKE_PASSWORD`
+- `SNOWFLAKE_PRIVATE_KEY` (PKCS#8 PEM registered on the Snowflake user), or `SNOWFLAKE_PASSWORD`
 - `SNOWFLAKE_ROLE`
 - `SNOWFLAKE_WAREHOUSE`
 - `SNOWFLAKE_DATABASE`
 - `SNOWFLAKE_SCHEMA`
 
 The Snowflake project definition lives in `snowflake.yml`.
+
+For unattended deployment, prefer a dedicated Snowflake service user with key-pair authentication. Store its private key only in GitHub Actions secrets. The workflow writes the key to a restricted temporary file and removes it after each command. Password authentication remains available for accounts that allow it without an interactive MFA challenge.
+
+MCP installation itself requires no credentials and initially uses bundled demo data. To query your Snowflake tables, configure the `SNOWFLAKE_*` connection variables on the machine running the MCP server. GitHub deployment secrets are not passed to installed MCP clients.
 
 ## What The Agent Does
 
