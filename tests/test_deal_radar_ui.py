@@ -102,7 +102,7 @@ class RealUI(unittest.TestCase):
  def test_blank_model_cannot_contact_cortex(self):
   app=self.app("snowflake_streamlit_app.py")
   app.radio[0].set_value("Center analysis").run(timeout=20)
-  self.assertTrue(any("Hackathon model not configured" in x.value for x in app.caption))
+  self.assertTrue(any("deterministic responses, no live LLM inference" in x.value for x in app.caption))
   context=ModuleType("snowflake.snowpark.context")
   context.get_active_session=Mock(side_effect=AssertionError("No model session allowed"))
   modules={"snowflake":ModuleType("snowflake"),"snowflake.snowpark":ModuleType("snowflake.snowpark"),"snowflake.snowpark.context":context}

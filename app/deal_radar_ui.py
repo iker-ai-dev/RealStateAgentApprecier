@@ -5,11 +5,13 @@ Broker/listing assertions remain unverified; selection never populates legacy ma
 import json
 import math
 import hashlib
+import os
 from html import escape
 from pathlib import Path
 
 import streamlit as st
 from app.listing_discovery import safe_public_url
+from app.discovery_jobs import start_scan
 
 LEAD_PATH = Path(__file__).parent / "data" / "listing_leads.json"
 MAX_LEADS = 100
@@ -158,19 +160,25 @@ def _card(lead, key):
         unsafe_allow_html=True,
     )
     st.caption("Evidence status: " + ("Synthetic / unverified" if demo else ("Search result only / page unverified" if discovery else "Broker assertion / needs verification")) + ". Vacancy cause and tenant stability are unknown.")
-    if lead.get("occupancy_basis"):
-        st.text("Occupancy basis: " + str(lead["occupancy_basis"]).replace("_", " "))
-    for field in ("risk_note", "qualification_note", "source_advertised_status"):
-        if lead.get(field):
-            prefix = "Source advertised status: " if field == "source_advertised_status" else ""
-            st.text(prefix + str(lead[field]))
+    if lead.get("source_advertised_status"):
+        st.caption("Availability recheck: " + str(lead["source_advertised_status"]))
+    with st.expander("Source evidence & unknowns"):
+        if lead.get("occupancy_basis"):
+            st.text("Occupancy basis: " + str(lead["occupancy_basis"]).replace("_", " "))
+        for field in ("risk_note", "qualification_note", "financial_note", "source_support_location"):
+            if lead.get(field):
+                st.text(str(lead[field]))
+        for item in source_notes(lead.get("missing_fields")):
+            st.text("Missing: " + item.replace("_", " "))
+        for item in source_notes(lead.get("source_conflicts")):
+            st.text("Source conflict: " + item)
     if vac is not None and vac > 35:
         st.caption("Elevated vacancy: test demand, access, achievable rent and capital needs before assuming lease-up.")
     url = safe_url(lead.get("url"))
     st.caption(f"{lead.get('source_name') or 'Source unknown'} · Listed {lead.get('listing_date') or 'date unknown'} · Retrieved {lead.get('retrieved_at') or 'date unknown'}")
     left, right = st.columns([.56,.44])
     with left:
-        picked = st.button("Review this lead", key=key, type="primary", width="stretch")
+        picked = st.button("Review this lead", key=key, type="primary", width="stretch", icon=":material/fact_check:")
     with right:
         if url:
             st.link_button("Open source ↗", url, width="stretch")
@@ -242,18 +250,53 @@ def render_lead_detail(lead):
                     st.link_button("Open county source ↗", url)
 
 
+def render_discovery_status():
+    job = st.session_state.get("radar_discovery_job")
+    if job is None:
+        return
+    was_active = job.active
+    job.poll()
+    if was_active and not job.active:
+        st.rerun(scope="app")
+    heading, action = st.columns([3, 1])
+    heading.markdown("**Background discovery agents** · Cached-source scan")
+    if action.button("Refresh scan", icon=":material/refresh:", disabled=job.active, width="stretch"):
+        st.session_state.radar_discovery_job = start_scan(
+            st.session_state.radar_discovery_records, filter_leads,
+            st.session_state.radar_discovery_filters)
+        st.rerun(scope="app")
+    states = job.statuses()
+    for name, future in job.workers.items():
+        if states[name] == "Complete":
+            states[name] += f" · {future.result()['observed']} leads"
+    st.markdown('<div class="rs-workers">' + ''.join(
+        '<div><strong>' + escape(name) + '</strong><span>' + escape(state) + '</span></div>'
+        for name, state in states.items()) + '</div>', unsafe_allow_html=True)
+    completed = [future.result() for future in job.workers.values()
+                 if future.done() and not future.cancelled() and future.exception() is None]
+    count = sum(group["observed"] for group in completed)
+    vintages = sorted({v for group in completed for v in group["vintages"]})
+    vintage = ', '.join(sorted({v[:10] for v in vintages})) or "Not observed yet"
+    st.caption(f"Observed {count} property leads · Snapshot retrieval vintage: {vintage} · No live web or LLM calls.")
+    if job.error:
+        st.error(job.error)
+    elif job.result is not None:
+        st.caption(f"Scan complete · {len(job.result['leads'])} review leads under the scan filters · "
+                   f"{job.result['resources']} research resources excluded · Availability is not verified.")
+    else:
+        st.caption("Scanning saved snapshots in background. Saved leads remain available below.")
+
+
 def render_deal_radar(leads=None):
     """Return selected lead or None; render locally without any live research."""
-    st.markdown('<div class="rs-hero"><div><div class="rs-eyebrow">PUBLIC DEAL DISCOVERY</div><h1>Find the space.<br>Investigate the upside.</h1><p>Build a shortlist of partially vacant strip centers. Start with listing evidence, then test the lease-up thesis and the numbers.</p></div><div class="rs-mandate"><strong>$1–10m</strong><span>U.S. open-air centers</span><span>10–60% vacancy · lean toward 75% occupancy</span><span>20%+ IRR / 6–7× equity goals · not evaluated</span></div></div>',unsafe_allow_html=True)
+    st.markdown('<div class="rs-hero"><div><div class="rs-eyebrow">ACQUISITION WORKSPACE</div><h1>Public deal radar</h1><p>Review partially vacant retail centers from saved public-source evidence.</p></div><div class="rs-mandate"><strong>$1–10m</strong><span>U.S. open-air centers · 10–60% vacancy</span><span>20%+ IRR / 6–7× equity goals · not evaluated</span></div></div>',unsafe_allow_html=True)
     st.markdown('<div class="rs-mode"><b>DISCOVERY ONLY</b> · Public listing assertions are unverified. Missing facts stay unknown. No investment decision or return-target fit.</div>',unsafe_allow_html=True)
-    st.markdown('<div class="rs-pipeline"><span><b>01</b> Discover public leads</span><span><b>02</b> Verify facts &amp; vacancy thesis</span><span><b>03</b> Build dated underwriting</span></div>',unsafe_allow_html=True)
+    st.markdown('<div class="rs-pipeline"><span><b>01</b> Background agents</span><span><b>02</b> Review leads &amp; evidence</span><span><b>03</b> Financial analysis · needs documents</span></div>',unsafe_allow_html=True)
     # Root-owned explicit-search control. Importing/rendering does not spend credits.
     try:
         from app.research_ui import render_listing_search
     except ImportError:
         render_listing_search = None
-    if render_listing_search is not None:
-        render_listing_search()
     warning = None
     if leads is None:
         leads = st.session_state.get("listing_leads")
@@ -263,6 +306,7 @@ def render_deal_radar(leads=None):
         leads=[]; warning="Listing leads must be a bounded list of public-source records."
     leads=[x for x in leads if isinstance(x,dict)]
     if warning:st.warning(warning)
+    discovery_panel = st.container()
     resources = [row for row in leads if not is_property_lead(row)]
     candidates = [row for row in leads if is_property_lead(row)]
     if resources:
@@ -273,7 +317,7 @@ def render_deal_radar(leads=None):
                 url = safe_url(record.get("url"))
                 if url:
                     st.link_button("Open research source ↗", url)
-    with st.container(border=True):
+    with st.expander("Screening filters"):
         a,b,c = st.columns([1.15,1,1])
         with a:
             markets=["All markets"]+sorted({location(x) for x in leads if location(x)!="Market unknown"})
@@ -292,6 +336,25 @@ def render_deal_radar(leads=None):
             include_unknown=st.checkbox("Keep price / occupancy unknowns",True,key="radar_unknowns")
             st.caption("Unknowns are leads to verify, never filter matches.")
     minimum={"Any coverage":None,"Published $80k+":80000,"Published $100k+":100000,"Published $120k+":120000}[income_choice]
+    scan_filters = dict(market=market, sources=sources, price=price, vacancy_band=VACANCY_BANDS[band],
+                        include_unknown=include_unknown, minimum_income=minimum)
+    signature = hashlib.sha256(json.dumps([leads, scan_filters], sort_keys=True, default=str).encode()).hexdigest()
+    job = st.session_state.get("radar_discovery_job")
+    if job is not None:
+        job.poll()
+    if job is None or st.session_state.get("radar_discovery_signature") != signature:
+        if job is not None and job.active:
+            job.cancel()
+        st.session_state.radar_discovery_job = start_scan(leads, filter_leads, scan_filters)
+        st.session_state.radar_discovery_signature = signature
+    st.session_state.radar_discovery_records = leads
+    st.session_state.radar_discovery_filters = scan_filters
+    with discovery_panel:
+        interval = "1s" if st.session_state.radar_discovery_job.active else None
+        st.fragment(run_every=interval)(render_discovery_status)()
+    if render_listing_search is not None and os.getenv("RETAILSCOPE_PUBLIC_DEMO", "").lower() != "true":
+        with st.expander("Optional live research connection"):
+            render_listing_search()
     shown=filter_leads(leads,market=market,sources=sources,price=price,vacancy_band=VACANCY_BANDS[band],include_unknown=include_unknown,minimum_income=minimum)
     header,aside=st.columns([.7,.3])
     header.subheader("Public listing leads")

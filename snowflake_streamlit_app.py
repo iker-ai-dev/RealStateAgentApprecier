@@ -15,7 +15,7 @@ from app.services.topic_router import route_topic
 from app.data_access import get_snowflake_config
 from app.research_ui import render_research
 from app.deal_radar_ui import render_deal_radar
-from app.mcp_install import PUBLIC_MCP_URL, remote_install_commands
+from app.mcp_landing import render_mcp_landing
 from app.presentation import apply_presentation, navigation, render_analysis_header, render_analysis_mode
 
 
@@ -238,18 +238,18 @@ def get_session():
 
 
 def render_chat(property_row, tenants, market, comps, valuation) -> None:
-    st.subheader("Agent Chat")
+    st.subheader("Research assistant")
     model = get_snowflake_config().get("cortex_model", "")
     configured = isinstance(model, str) and bool(model.strip())
-    st.caption("Hackathon Cortex model configured. Financial facts are host-rendered." if configured else "Hackathon model not configured. Deterministic fallback; no LLM generation.")
+    st.caption("Cortex topic routing configured · host-rendered financial facts" if configured else "Demo assistant · deterministic responses, no live LLM inference")
 
     examples = [
-        "Should we acquire this center at asking price?",
-        "Where is the rent upside?",
-        "What risks should diligence focus on?",
+        ("Acquisition gaps", "Should we acquire this center at asking price?", ":material/fact_check:"),
+        ("Rent upside", "Where is the rent upside?", ":material/trending_up:"),
+        ("Key risks", "What risks should diligence focus on?", ":material/policy:"),
     ]
-    for col, example in zip(st.columns(3), examples):
-        if col.button(example, width="stretch"):
+    for col, (label, example, icon) in zip(st.columns(3), examples):
+        if col.button(label, icon=icon, width="stretch"):
             submit_question(example, property_row, tenants, market, comps, valuation)
 
     for message in st.session_state.messages:
@@ -264,9 +264,9 @@ def render_chat(property_row, tenants, market, comps, valuation) -> None:
 
 def submit_question(question, property_row, tenants, market, comps, valuation) -> None:
     st.session_state.messages.append({"role": "user", "content": question})
-    with st.status("Underwriting the answer...", expanded=True) as status:
+    with st.status("Preparing a research answer...", expanded=True) as status:
         st.write("Reading property, rent roll, trade area, and comps.")
-        st.write("Running Cortex or local underwriting fallback.")
+        st.write("Checking evidence and model assumptions.")
         answer = answer_agent(question, property_row, tenants, market, comps, valuation)
         status.update(label="Answer ready", state="complete", expanded=False)
     st.session_state.messages.append({"role": "assistant", "content": answer})
@@ -447,44 +447,7 @@ def money(value) -> str:
 
 
 def render_mcp_install_page() -> None:
-
-    st.markdown('<span class="badge">MCP Server</span>', unsafe_allow_html=True)
-    st.title("RetailScope AI")
-    st.markdown(
-        '<div class="subtitle">Install RetailScope AI in your coding agent and query shopping-center rent rolls, market context, comps, valuation outputs, and the appraisal answer layer.</div>',
-        unsafe_allow_html=True,
-    )
-
-    left, right = st.columns([0.48, 0.52], gap="large")
-    with left:
-        st.subheader("Tools")
-        st.markdown(
-            """
-            - `list_shopping_centers`
-            - `get_shopping_center_context`
-            - `appraise_shopping_center`
-            - `ask_retailscope`
-            """
-        )
-        st.markdown('<div class="section-label">Public MCP endpoint</div>', unsafe_allow_html=True)
-        st.code(PUBLIC_MCP_URL, language="text")
-        st.caption("Public demo data only. Deterministic answers; no live LLM inference or private Snowflake data.")
-
-    with right:
-        st.subheader("Copy-Paste Install")
-        commands = remote_install_commands()
-        tabs = st.tabs(list(commands.keys()))
-        for tab, (label, command) in zip(tabs, commands.items()):
-            with tab:
-                language = "json" if label in {"Generic JSON", "OpenCode"} else "bash"
-                st.markdown(f'<div class="copy-label">{label}</div>', unsafe_allow_html=True)
-                st.code(command, language=language)
-
-    st.markdown('<div class="section-label">Example prompt</div>', unsafe_allow_html=True)
-    st.code(
-        "Use RetailScope AI to appraise SC-001 and tell me whether the rent roll supports the asking price.",
-        language="text",
-    )
+    render_mcp_landing()
 
 
 if __name__ == "__main__":

@@ -10,6 +10,8 @@ from app.observability import capture_exception, start_span, start_agent_transac
 
 
 def _nimble_key():
+    if os.getenv("RETAILSCOPE_PUBLIC_DEMO") == "true":
+        return ""
     try:
         binding = importlib.import_module("_snowflake")
     except ImportError:
@@ -25,6 +27,8 @@ def _nimble_key():
 
 
 def render_research(market):
+    if os.getenv("RETAILSCOPE_PUBLIC_DEMO") == "true":
+        return
     with st.expander("Live market discovery with Nimble"):
         st.caption("Search public evidence first. One search may consume Nimble credits. "
                    "Search results are discovery leads, not verified rent rolls or income forecasts.")
@@ -56,6 +60,8 @@ def render_research(market):
 
 def render_listing_search():
     """One user-triggered discovery call; no credential values appear in the UI."""
+    if os.getenv("RETAILSCOPE_PUBLIC_DEMO") == "true":
+        return
     from app.listing_discovery import discover_listings
     with st.expander("Find fresh public listing leads"):
         st.caption("Search Crexi, LoopNet and public broker sites. One search may consume Nimble credits. "
