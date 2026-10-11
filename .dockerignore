@@ -1,0 +1,14 @@
+.git
+.venv
+.streamlit/secrets.toml
+**/__pycache__
+*.egg-info
+build
+output
+tmp
+sites
+*.pem
+*.p8
+.env*
+* 2
+* 2.*

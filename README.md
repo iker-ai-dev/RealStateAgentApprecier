@@ -38,10 +38,15 @@ uvx --from git+https://github.com/iker-ai-dev/RealStateAgentApprecier.git retail
 Agent install commands:
 
 ```bash
-codex mcp add retailscope-ai -- uvx --from git+https://github.com/iker-ai-dev/RealStateAgentApprecier.git retailscope-mcp
-claude mcp add retailscope-ai -- uvx --from git+https://github.com/iker-ai-dev/RealStateAgentApprecier.git retailscope-mcp
-opencode mcp add retailscope-ai -- uvx --from git+https://github.com/iker-ai-dev/RealStateAgentApprecier.git retailscope-mcp
+codex mcp add retailscope-ai --url https://retailscope-ai-demo.onrender.com/mcp
+claude mcp add --transport http retailscope-ai https://retailscope-ai-demo.onrender.com/mcp
 ```
+
+The public endpoint uses stateless Streamable HTTP and bundled synthetic sample
+data only. It never reads Snowflake connection settings or private tables, even
+if credentials are accidentally present. Answers are deterministic, not live
+LLM inference. Local stdio remains available for authenticated private data.
+OpenCode's remote JSON configuration is provided on `/landing`.
 
 The server exposes:
 
@@ -118,6 +123,14 @@ Sentry uses static operation names, generated trace IDs, timing and fixed status
 - **Render/Fly.io/Railway**: simple external hosting if Snowflake is accessed over the network with secrets.
 
 This repository includes a `Dockerfile` and `render.yaml` for container-based deployment.
+
+The public Render container supervises Streamlit and the demo-only MCP server
+behind nginx on `$PORT` (default 10000). `/mcp` routes to MCP; other routes and
+WebSockets reach Streamlit. `/healthz` is the public health check. MCP requests
+have a 64 KiB body limit, IP rate limiting, and Host/Origin allowlists. The image
+excludes local secrets, Git metadata, and generated artifacts. Render Free may
+cold-start after inactivity. Authenticated private datasets must not be exposed
+through this anonymous demo service.
 
 For Streamlit in Snowflake deployment, use `snowflake_streamlit_app.py` as the entrypoint and upload the complete repository modules. It uses active Snowpark session data when the expected tables exist and falls back to embedded demo data otherwise.
 
