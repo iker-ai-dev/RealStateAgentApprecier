@@ -9,7 +9,7 @@ from datetime import date
 import pandas as pd
 import streamlit as st
 
-from app.observability import init_sentry, start_agent_transaction
+from app.observability import init_sentry, start_agent_transaction, start_span
 from app.acquisition_policy import (GATE, DISCLAIMER, context_fingerprint, validate_model_inputs, diligence_flags, render_research_answer)
 from app.services.topic_router import route_topic
 from app.data_access import get_snowflake_config
@@ -165,7 +165,10 @@ def render_workspace() -> None:
     market = markets.loc[markets["property_id"] == selected_id].iloc[0]
     comps = comps_all.loc[comps_all["property_id"] == selected_id].copy()
     try:
-        valuation = build_valuation(property_row, tenants, market, comps)
+        with start_agent_transaction("retailscope_ai.calculation"), start_span(
+            "app.valuation", "Build commercial real estate valuation"
+        ):
+            valuation = build_valuation(property_row, tenants, market, comps)
     except (ValueError, KeyError, TypeError, OverflowError):
         st.error("Dataset inputs are incomplete or invalid. Correct the property/rent/comparison data before calculating.")
         st.stop()
@@ -323,7 +326,8 @@ def answer_agent(question, property_row, tenants, market, comps, valuation) -> s
         model = get_snowflake_config().get("cortex_model", "")
         session = get_session() if isinstance(model, str) and model.strip() else None
         topic, provider = route_topic(question, session, model)
-    return render_research_answer(topic, property_row, tenants, market, comps, valuation, provider=provider)
+        with start_span("ai.fallback", "Deterministic local appraisal answer"):
+            return render_research_answer(topic, property_row, tenants, market, comps, valuation, provider=provider)
 
 
 def answer_locally(question, property_row, tenants, market, comps, valuation) -> str:

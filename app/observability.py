@@ -13,6 +13,7 @@ import os
 import re
 import sys
 from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import datetime
 from threading import Lock
 from typing import Any, Callable, Iterator
@@ -20,6 +21,7 @@ from urllib.parse import urlsplit
 
 try:
     import sentry_sdk
+    import sentry_sdk.logger as sentry_logger
 except Exception:  # Optional SDK; application operation does not depend on it.
     sentry_sdk = None
 
@@ -35,6 +37,12 @@ TRANSACTIONS = {
     "retailscope_ai.answer": "ai.pipeline",
     "retailscope_ai.research": "agent.research",
     "retailscope_ai.calculation": "agent.calculation",
+    "retailscope_ai.mcp.list_centers": "mcp.server",
+    "retailscope_ai.mcp.get_context": "mcp.server",
+    "retailscope_ai.mcp.appraise": "mcp.server",
+    "retailscope_ai.mcp.ask": "mcp.server",
+    "retailscope_ai.discovery": "agent.discovery",
+    "retailscope_ai.discovery_source": "agent.discovery_source",
 }
 STEPS = {
     "db.load": "Load shopping center dataset",
@@ -45,12 +53,22 @@ STEPS = {
     "mcp.initialize": "nimble.initialize",
     "mcp.tools": "nimble.discover_tools",
     "mcp.search": "nimble.search",
+    "discovery.scan": "Scan cached public listing sources",
+    "discovery.screen": "Screen cached public listing leads",
+}
+WORKFLOW_MESSAGES = {
+    "started": "RetailScope workflow started",
+    "completed": "RetailScope workflow completed",
+    "failed": "RetailScope workflow failed",
 }
 STATUSES = frozenset(("ok", "internal_error", "cancelled", "unknown_error",
                       "deadline_exceeded", "unavailable", "resource_exhausted"))
 _UNSET = object()
 _client = None
+_environment = ENVIRONMENT
+_release = RELEASE
 _init_lock = Lock()
+_error_captured = ContextVar("retailscope_error_captured", default=False)
 
 
 def _hex(value: Any, size: int) -> bool:
@@ -74,7 +92,7 @@ def _time(value: Any) -> Any:
 
 
 def _base(event: dict[str, Any]) -> dict[str, Any]:
-    safe = {"platform": "python", "release": RELEASE, "environment": ENVIRONMENT}
+    safe = {"platform": "python", "release": _release, "environment": _environment}
     if _hex(event.get("event_id"), 32):
         safe["event_id"] = event["event_id"]
     for key in ("timestamp", "start_timestamp"):
@@ -105,7 +123,61 @@ def _scrub_event(event: dict[str, Any], hint: dict[str, Any]) -> dict[str, Any] 
     safe.update(level="error", tags={"retailscope.telemetry": "operation_error"},
                 exception={"values": [{"type": "OperationError", "value": ERROR_MESSAGE}]},
                 fingerprint=["retailscope.operation_error"])
+    contexts = event.get("contexts")
+    raw_trace = contexts.get("trace") if isinstance(contexts, dict) else None
+    if isinstance(raw_trace, dict):
+        op = raw_trace.get("op")
+        if type(op) is str and op in (*TRANSACTIONS.values(), *STEPS):
+            trace = _trace(raw_trace, op)
+            if "trace_id" in trace and "span_id" in trace:
+                safe["contexts"] = {"trace": trace}
+    name = event.get("transaction")
+    if type(name) is str and name in TRANSACTIONS:
+        safe["transaction"] = name
     return safe
+
+
+def _scrub_log(log: dict[str, Any], hint: dict[str, Any]) -> dict[str, Any] | None:
+    """SDK before_send_log(Log, Hint): rebuild approved lifecycle logs only."""
+    hint["attachments"] = []
+    if not isinstance(log, dict) or not isinstance(log.get("attributes"), dict):
+        return None
+    attrs = log["attributes"]
+    name, phase = attrs.get("retailscope.workflow"), attrs.get("retailscope.phase")
+    if (attrs.get("retailscope.telemetry") != "workflow"
+            or type(name) is not str or name not in TRANSACTIONS
+            or type(phase) is not str or phase not in WORKFLOW_MESSAGES
+            or log.get("body") != WORKFLOW_MESSAGES[phase]
+            or not _hex(log.get("trace_id"), 32) or not _hex(log.get("span_id"), 16)
+            or type(log.get("time_unix_nano")) is not int or log["time_unix_nano"] <= 0):
+        return None
+    failed = phase == "failed"
+    return {
+        "body": WORKFLOW_MESSAGES[phase],
+        "severity_text": "error" if failed else "info",
+        "severity_number": 17 if failed else 9,
+        "time_unix_nano": log["time_unix_nano"],
+        "trace_id": log["trace_id"], "span_id": log["span_id"],
+        "attributes": {"retailscope.telemetry": "workflow", "retailscope.workflow": name,
+                       "retailscope.phase": phase, "sentry.environment": _environment,
+                       "sentry.release": _release},
+    }
+
+
+def _runtime_labels(runtime: str) -> tuple[str, str]:
+    environment = "application"
+    if runtime == "warehouse":
+        environment = "snowflake"
+    elif runtime == "render" or os.getenv("RENDER") == "true" or (
+            runtime == "container" and os.getenv("RETAILSCOPE_PUBLIC_DEMO") == "true"):
+        environment = "render-demo"
+    release = RELEASE
+    for key in ("RENDER_GIT_COMMIT", "GITHUB_SHA"):
+        sha = os.getenv(key)
+        if type(sha) is str and re.fullmatch(r"[0-9a-fA-F]{40}", sha):
+            release = sha.lower()
+            break
+    return environment, release
 
 
 def _scrub_transaction(event: dict[str, Any], hint: dict[str, Any]) -> dict[str, Any] | None:
@@ -199,11 +271,11 @@ def init_sentry(*, runtime: str | None = None, dsn: Any = _UNSET,
     sending. transport is an offline test sink. Unknown/invalid config fails closed.
     Never adopt an SDK client initialized elsewhere with unsafe options.
     """
-    global _client
+    global _client, _environment, _release
     if sentry_sdk is None:
         return False
     selected = runtime or os.getenv("RETAILSCOPE_RUNTIME", "local")
-    if selected not in ("local", "container", "warehouse"):
+    if selected not in ("local", "container", "warehouse", "render"):
         _disable_owned_client()
         return False
     if _is_warehouse():
@@ -228,8 +300,9 @@ def init_sentry(*, runtime: str | None = None, dsn: Any = _UNSET,
         if sentry_sdk.is_initialized():
             return False
         try:
+            _environment, _release = _runtime_labels(selected)
             sentry_sdk.init(
-                dsn=configured_dsn, environment=ENVIRONMENT, release=RELEASE,
+                dsn=configured_dsn, environment=_environment, release=_release,
                 server_name="retailscope-ai", debug=False, send_default_pii=False,
                 include_local_variables=False, include_source_context=False,
                 attach_stacktrace=False, max_breadcrumbs=0, max_request_body_size="never",
@@ -237,9 +310,10 @@ def init_sentry(*, runtime: str | None = None, dsn: Any = _UNSET,
                 auto_session_tracking=False, traces_sample_rate=rate,
                 trace_lifecycle="static", propagate_traces=False, trace_propagation_targets=[],
                 profiles_sample_rate=0.0, profile_session_sample_rate=0.0,
-                enable_logs=False, enable_metrics=False, send_client_reports=False,
+                enable_logs=True, enable_metrics=False, send_client_reports=False,
                 enable_backpressure_handling=False, stream_gen_ai_spans=False,
                 before_send=_scrub_event, before_send_transaction=_scrub_transaction,
+                before_send_log=_scrub_log,
                 before_breadcrumb=lambda breadcrumb, hint: None, transport=transport,
             )
             _client = sentry_sdk.get_client()
@@ -281,8 +355,10 @@ def start_span(op: str, name: str, data: dict[str, Any] | None = None) -> Iterat
     if not _enabled() or type(op) is not str or op not in STEPS or name != STEPS[op]:
         yield None
         return
-    with sentry_sdk.start_span(op=op, name=STEPS[op]):
+    with sentry_sdk.start_span(op=op, name=STEPS[op]) as span:
         yield None
+        if span.status is None:
+            span.set_status("ok")
 
 
 @contextmanager
@@ -293,14 +369,52 @@ def start_agent_transaction(name: str, data: dict[str, Any] | None = None) -> It
         return
     with sentry_sdk.new_scope() as scope:
         scope.clear()
-        with sentry_sdk.start_transaction(op=TRANSACTIONS[name], name=name):
-            yield None
+        with sentry_sdk.start_transaction(op=TRANSACTIONS[name], name=name) as transaction:
+            token = _error_captured.set(False)
+            try:
+                _workflow_log(name, "started")
+                try:
+                    yield None
+                except Exception as exc:
+                    transaction.set_status("internal_error")
+                    if not _error_captured.get():
+                        capture_exception(exc)
+                    _workflow_log(name, "failed")
+                    raise
+                else:
+                    if transaction.status is None:
+                        transaction.set_status("ok")
+                    _workflow_log(name, "completed" if transaction.status == "ok" else "failed")
+            finally:
+                _error_captured.reset(token)
+
+
+def _workflow_log(name: str, phase: str) -> None:
+    # Static strings only; the hook also removes SDK/scope-added attributes.
+    try:
+        logger = sentry_logger.error if phase == "failed" else sentry_logger.info
+        logger(WORKFLOW_MESSAGES[phase], attributes={
+            "retailscope.telemetry": "workflow", "retailscope.workflow": name,
+            "retailscope.phase": phase,
+        })
+    except Exception:
+        pass  # Optional telemetry must not change application behavior.
 
 
 def capture_exception(exc: Exception) -> None:
     """Record a fixed operational failure without inspecting the exception."""
     if _enabled():
-        sentry_sdk.capture_event({
-            "level": "error", "tags": {"retailscope.telemetry": "operation_error"},
-            "exception": {"values": [{"type": "OperationError", "value": ERROR_MESSAGE}]},
-        })
+        try:
+            span = sentry_sdk.get_current_scope().span
+            if span is not None:
+                transaction = span.containing_transaction
+                if transaction is not None and transaction.name in TRANSACTIONS:
+                    span.set_status("internal_error")
+                    transaction.set_status("internal_error")
+                    _error_captured.set(True)
+            sentry_sdk.capture_event({
+                "level": "error", "tags": {"retailscope.telemetry": "operation_error"},
+                "exception": {"values": [{"type": "OperationError", "value": ERROR_MESSAGE}]},
+            })
+        except Exception:
+            pass

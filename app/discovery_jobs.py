@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from urllib.parse import urlsplit
 
+from app.observability import start_agent_transaction, start_span
+
 GROUPS = ("Listing platforms", "Broker documents", "Broker websites")
 MAX_RECORDS = 100
 
@@ -34,12 +36,19 @@ def scan_source(rows):
 
 
 def summarize(groups, screen, filters):
+    with start_agent_transaction("retailscope_ai.discovery"):
+        return _summarize(groups, screen, filters)
+
+
+def _summarize(groups, screen, filters):
     groups = [future.result() for future in groups]
     indexed = sorted((item for group in groups for item in group["rows"]), key=lambda item: item[0])
     rows = [row for _, row in indexed]
+    with start_span("discovery.screen", "Screen cached public listing leads"):
+        leads = screen(rows, **filters)
     return {"observed": sum(group["observed"] for group in groups),
             "resources": sum(group["resources"] for group in groups),
-            "leads": screen(rows, **filters),
+            "leads": leads,
             "vintages": sorted({str(row.get("retrieved_at") or "Unknown") for row in rows}),
             "unknown_availability": sum(group["unknown_availability"] for group in groups)}
 
@@ -96,6 +105,12 @@ class DiscoveryJob:
         return states
 
 
+def _scan_source_traced(rows):
+    with start_agent_transaction("retailscope_ai.discovery_source"):
+        with start_span("discovery.scan", "Scan cached public listing sources"):
+            return scan_source(rows)
+
+
 def start_scan(records, screen, filters=None):
     if not isinstance(records, list) or len(records) > MAX_RECORDS or any(not isinstance(row, dict) for row in records):
         raise ValueError("Expected at most 100 saved public-source records.")
@@ -104,7 +119,7 @@ def start_scan(records, screen, filters=None):
         groups[source_group(row)].append((index, row))
     executor = ThreadPoolExecutor(max_workers=3, thread_name_prefix="cached-discovery")
     try:
-        workers = {name: executor.submit(scan_source, rows) for name, rows in groups.items()}
+        workers = {name: executor.submit(_scan_source_traced, rows) for name, rows in groups.items()}
         job = DiscoveryJob(executor, workers, screen, deepcopy(filters or {}),
                            datetime.now(timezone.utc).isoformat())
         job.summary = executor.submit(summarize, list(workers.values()), screen, job.filters)

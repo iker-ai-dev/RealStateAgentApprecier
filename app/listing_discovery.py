@@ -6,7 +6,7 @@ import json
 from urllib.parse import urlsplit, parse_qsl
 
 from nimble_mcp import NimbleMCP, IntegrationError
-from app.observability import start_agent_transaction, start_span, capture_exception
+from app.observability import start_agent_transaction, start_span
 
 DEFAULT_DOMAINS = ("crexi.com", "loopnet.com", "marcusmillichap.com", "matthews.com")
 
@@ -99,13 +99,9 @@ def normalize_listing_leads(result, *, query, retrieved_at=None):
 
 
 def discover_listings(api_key, query, *, source_domains=DEFAULT_DOMAINS):
-    try:
-        with start_agent_transaction("retailscope_ai.research"):
-            with NimbleMCP(api_key, max_search_calls=1, max_results=10) as client:
-                with start_span("mcp.search", "nimble.search"):
-                    evidence = client.search(query, source_domains=source_domains, max_results=10)
+    with start_agent_transaction("retailscope_ai.research"):
+        with NimbleMCP(api_key, max_search_calls=1, max_results=10) as client:
+            with start_span("mcp.search", "nimble.search"):
+                evidence = client.search(query, source_domains=source_domains, max_results=10)
         return {"query": query, "leads": normalize_listing_leads(evidence, query=query),
                 "evidence": evidence, "status": "DISCOVERY_ONLY"}
-    except Exception as error:
-        capture_exception(error)
-        raise
