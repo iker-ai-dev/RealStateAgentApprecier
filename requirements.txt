@@ -1,0 +1,6 @@
+altair>=5.3
+pandas>=2.2
+sentry-sdk>=2.22
+snowflake-connector-python>=3.12
+snowflake-snowpark-python>=1.23
+streamlit>=1.38
