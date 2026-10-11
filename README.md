@@ -44,6 +44,19 @@ The app expects these logical fields:
 
 When running inside Streamlit in Snowflake, the app attempts to use the active Snowpark session.
 
+Hosted deployments can also use environment variables instead of Streamlit secrets:
+
+```bash
+SNOWFLAKE_ACCOUNT=...
+SNOWFLAKE_USER=...
+SNOWFLAKE_PASSWORD=...
+SNOWFLAKE_ROLE=...
+SNOWFLAKE_WAREHOUSE=...
+SNOWFLAKE_DATABASE=...
+SNOWFLAKE_SCHEMA=...
+SNOWFLAKE_CORTEX_MODEL=claude-sonnet-5
+```
+
 ## Sentry Observability
 
 The app initializes Sentry when `SENTRY_DSN` is set or when secrets include:
@@ -64,6 +77,8 @@ Sentry spans are emitted for dataset loading, valuation, prompt construction, Co
 - **Streamlit Community Cloud**: good for a fast hosted demo from GitHub; add Snowflake and Sentry values in app secrets.
 - **Snowpark Container Services or another container host**: best for production control, private networking, CI/CD, and release management.
 - **Render/Fly.io/Railway**: simple external hosting if Snowflake is accessed over the network with secrets.
+
+This repository includes a `Dockerfile` and `render.yaml` for container-based deployment.
 
 ## What The Agent Does
 
