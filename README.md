@@ -80,6 +80,8 @@ Sentry spans are emitted for dataset loading, valuation, prompt construction, Co
 
 This repository includes a `Dockerfile` and `render.yaml` for container-based deployment.
 
+For fast Streamlit in Snowflake deployment, use `snowflake_streamlit_app.py` as a single-file entrypoint. It uses active Snowpark session data when the expected tables exist and falls back to embedded demo data otherwise.
+
 ## What The Agent Does
 
 - Answers acquisition questions against the selected center.
