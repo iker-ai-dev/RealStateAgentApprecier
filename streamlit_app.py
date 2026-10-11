@@ -95,16 +95,16 @@ CSS = """
 
 def main() -> None:
     st.markdown(CSS, unsafe_allow_html=True)
-    view = st.radio(
-        "View",
-        ["Underwriting Desk", "MCP Install"],
-        horizontal=True,
-        label_visibility="collapsed",
+    page = st.navigation(
+        [
+            st.Page(_render_underwriting_desk, title="Underwriting Desk", default=True),
+            st.Page(_render_mcp_install_page, title="MCP Install", url_path="landing"),
+        ]
     )
-    if view == "MCP Install":
-        _render_mcp_install_page()
-        return
+    page.run()
 
+
+def _render_underwriting_desk() -> None:
     with start_span("db.load", "Load shopping center dataset"):
         dataset = load_dataset()
 

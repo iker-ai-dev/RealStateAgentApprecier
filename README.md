@@ -15,6 +15,8 @@ streamlit run streamlit_app.py
 
 ## MCP Server
 
+The MCP install page is available at `/landing` (locally, `http://localhost:8501/landing`). It includes copyable commands for Codex, Claude Code, OpenCode, and a generic MCP JSON configuration.
+
 RetailScope AI can also run as a local stdio MCP server for coding agents:
 
 ```bash
@@ -122,6 +124,8 @@ Configure these GitHub Actions secrets before relying on automatic deployment:
 The Snowflake project definition lives in `snowflake.yml`.
 
 For unattended deployment, prefer a dedicated Snowflake service user with key-pair authentication. Store its private key only in GitHub Actions secrets. The workflow writes the key to a restricted temporary file and removes it after each command. Password authentication remains available for accounts that allow it without an interactive MFA challenge.
+
+The prepared service username is `RETAILSCOPE_DEPLOY`. An administrator must run `deploy/bootstrap_snowflake_user.sql` in Snowflake to create it and register its public key. The private key is stored separately from the repository. Confirm the existing warehouse and configure `SNOWFLAKE_WAREHOUSE` in GitHub before enabling deployment. The script reuses the existing deployment role; it does not transfer app ownership or create compute.
 
 MCP installation itself requires no credentials and initially uses bundled demo data. To query your Snowflake tables, configure the `SNOWFLAKE_*` connection variables on the machine running the MCP server. GitHub deployment secrets are not passed to installed MCP clients.
 

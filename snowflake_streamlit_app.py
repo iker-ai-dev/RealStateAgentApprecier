@@ -251,16 +251,16 @@ def main() -> None:
     global SENTRY_ENABLED
     SENTRY_ENABLED = init_sentry()
     st.markdown(CSS, unsafe_allow_html=True)
-    view = st.radio(
-        "View",
-        ["Underwriting Desk", "MCP Install"],
-        horizontal=True,
-        label_visibility="collapsed",
+    page = st.navigation(
+        [
+            st.Page(render_underwriting_desk, title="Underwriting Desk", default=True),
+            st.Page(render_mcp_install_page, title="MCP Install", url_path="landing"),
+        ]
     )
-    if view == "MCP Install":
-        render_mcp_install_page()
-        return
+    page.run()
 
+
+def render_underwriting_desk() -> None:
     with start_span("db.load", "Load shopping center dataset"):
         properties, tenants_all, markets, comps_all, source = load_data()
 
