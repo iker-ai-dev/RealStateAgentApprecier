@@ -5,7 +5,6 @@ name: cre-appraisal-agent
 channels:
   - snowflake
 dependencies:
-  - python=3.11
   - streamlit=1.50.0
   - snowflake-snowpark-python=1.55.0
   - requests=2.32.5
