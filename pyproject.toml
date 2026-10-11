@@ -30,4 +30,4 @@ include = ["app*"]
 py-modules = ["nimble_mcp"]
 
 [tool.setuptools.package-data]
-"app" = ["data/*.csv", "data/*.json"]
+"app" = ["data/*.csv", "data/*.json", "assets/*.png"]

@@ -48,6 +48,12 @@ if credentials are accidentally present. Answers are deterministic, not live
 LLM inference. Local stdio remains available for authenticated private data.
 OpenCode's remote JSON configuration is provided on `/landing`.
 
+The discovery workspace runs three bounded background workers over saved public
+listing snapshots, followed by screening and source-order summarization. Worker
+states, counts and snapshot vintage are visible. Refreshing a scan does not fetch
+fresh listings or make an LLM call. Unknown facts remain unknown, and public leads
+are kept separate from the synthetic centers used for illustrative valuation.
+
 The server exposes:
 
 - `list_shopping_centers`

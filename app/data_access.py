@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import importlib.util
 import os
 from pathlib import Path
+import sys
 from typing import Any
 
 import pandas as pd
@@ -42,6 +44,21 @@ def load_dataset(*, require_snowflake: bool = False) -> PropertyDataset:
 
 def _try_load_snowflake(*, require_snowflake: bool = False) -> PropertyDataset | None:
     cfg = get_snowflake_config()
+    configured = any(cfg.get(key) for key in (
+        "account", "user", "password", "role", "warehouse", "database", "schema",
+        "authenticator", "private_key_file",
+    ))
+    # Streamlit in Snowflake supplies an active session without local credentials.
+    hosted = "_snowflake" in sys.modules
+    if not configured and not hosted:
+        try:
+            hosted = importlib.util.find_spec("_snowflake") is not None
+        except (ImportError, ValueError):
+            hosted = False
+    if not configured and not hosted:
+        if require_snowflake:
+            raise RuntimeError("Snowflake is not configured. Demo data was not substituted.")
+        return None
 
     try:
         session = get_snowpark_session(cfg)
