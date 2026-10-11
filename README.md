@@ -144,6 +144,12 @@ For Streamlit in Snowflake deployment, use `snowflake_streamlit_app.py` as the e
 
 `.github/workflows/deploy-snowflake.yml` runs compile and data-path smoke tests on pull requests. When changes land on `main`, it uses Snowflake CLI to deploy `snowflake_streamlit_app.py` with `snow streamlit deploy`.
 
+The same tested-main workflow triggers the public Render app/MCP deployment
+through its service-specific `RENDER_DEPLOY_HOOK_URL` repository secret, pinned
+to the tested commit SHA. Render's independent auto-deploy is disabled so the
+test-gated GitHub pipeline owns releases. Deploy hooks contain credentials and
+must never be committed or shown in the manual.
+
 Configure these GitHub Actions secrets before relying on automatic deployment:
 
 - `SNOWFLAKE_ACCOUNT`

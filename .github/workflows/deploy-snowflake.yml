@@ -1,4 +1,4 @@
-name: Deploy Snowflake Streamlit
+name: Deploy RetailScope
 
 on:
   push:
@@ -59,6 +59,32 @@ jobs:
 
       - name: Run offline integration tests
         run: python -m unittest discover -s tests -v
+
+  deploy-render:
+    name: Deploy public app and MCP to Render
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    concurrency:
+      group: retailscope-render-production
+      cancel-in-progress: false
+    env:
+      RENDER_DEPLOY_HOOK_URL: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
+    steps:
+      - name: Deploy tested commit
+        run: |
+          if [ -z "$RENDER_DEPLOY_HOOK_URL" ]; then
+            echo "::error::RENDER_DEPLOY_HOOK_URL is not configured."
+            exit 1
+          fi
+          status=$(curl --silent --show-error --fail \
+            --connect-timeout 10 --max-time 30 --request POST \
+            --output /dev/null --write-out '%{http_code}' \
+            "${RENDER_DEPLOY_HOOK_URL}&ref=${GITHUB_SHA}")
+          case "$status" in
+            200|202) echo "Render accepted deploy of tested commit ${GITHUB_SHA}." ;;
+            *) echo "::error::Render rejected deployment (HTTP ${status})."; exit 1 ;;
+          esac
 
   deploy:
     name: Deploy to Snowflake

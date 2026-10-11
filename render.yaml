@@ -3,7 +3,7 @@ services:
     name: retailscope-ai-demo
     env: docker
     plan: free
-    autoDeploy: true
+    autoDeploy: false
     healthCheckPath: /healthz
     envVars:
       - key: RETAILSCOPE_PUBLIC_DEMO
