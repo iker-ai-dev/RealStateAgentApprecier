@@ -8,9 +8,11 @@ import socket
 import sys
 import types
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
 
 import sentry_sdk
+import sentry_sdk.logger as sentry_logger
 from sentry_sdk.transport import Transport
 
 SOURCE = pathlib.Path(__file__).resolve().parents[1] / 'app' / 'observability.py'
@@ -57,25 +59,33 @@ class PrivacyTests(unittest.TestCase):
         self.assertEqual(self.socket_mock.call_count, 0)
 
     def payloads(self):
-        return [item.payload.json for e in self.transport.envelopes for item in e.items]
+        return [item.payload.json for e in self.transport.envelopes for item in e.items
+                if item.type in ('event', 'transaction')]
+
+    def logs(self):
+        sentry_sdk.flush(timeout=1)
+        return [log for e in self.transport.envelopes for item in e.items
+                if item.type == 'log' for log in item.payload.json['items']]
 
     def contaminate(self):
         for scope in (sentry_sdk.get_global_scope(), sentry_sdk.get_isolation_scope(), sentry_sdk.get_current_scope()):
             scope.set_user({'email': CANARY})
             scope.set_tag('property.id', CANARY)
             scope.set_extra('property', CANARY)
+            scope.set_attribute('private.scope', CANARY)
             scope.set_context('request', {'url': CANARY, 'data': CANARY})
             scope.add_attachment(bytes=CANARY.encode(), filename=CANARY+'.txt', add_to_transactions=True)
         sentry_sdk.add_breadcrumb(message=CANARY, data={'Authorization': CANARY})
 
     def assert_safe(self):
+        sentry_sdk.flush(timeout=1)
         for envelope in self.transport.envelopes:
             raw = envelope.serialize()
             self.assertNotIn(CANARY.encode(), raw)
             for field in (b'"request"', b'"locals"', b'"stacktrace"', b'"user"',
                           b'"extra"', b'"breadcrumbs"', b'"dynamic_sampling_context"'):
                 self.assertNotIn(field, raw)
-            self.assertTrue(all(item.type in ('event', 'transaction') for item in envelope.items))
+            self.assertTrue(all(item.type in ('event', 'transaction', 'log') for item in envelope.items))
 
     def test_all_existing_apis_ignore_property_data_and_ai_arguments_results(self):
         self.contaminate()
@@ -125,25 +135,34 @@ class PrivacyTests(unittest.TestCase):
         self.assertEqual(self.payloads()[0]['spans'], [])
         self.assert_safe()
 
-    def test_failure_only_preserves_static_status_no_automatic_exception(self):
+    def test_failure_captures_sanitized_error_inside_active_trace(self):
+        self.contaminate()
         with self.assertRaises(ValueError):
             with obs.start_agent_transaction('retailscope_ai.answer'):
                 with obs.start_span('mcp.search', 'nimble.search'):
                     raise ValueError(CANARY)
-        self.assertEqual(len(self.payloads()), 1)
-        p = self.payloads()[0]
+        self.assertEqual(len(self.payloads()), 2)
+        error, p = self.payloads()
         self.assertEqual(p['contexts']['trace']['status'], 'internal_error')
         self.assertEqual(p['spans'][0]['status'], 'internal_error')
+        self.assertEqual(error['contexts']['trace']['trace_id'], p['contexts']['trace']['trace_id'])
+        self.assertEqual(error['contexts']['trace']['span_id'], p['contexts']['trace']['span_id'])
+        self.assertEqual(error['transaction'], p['transaction'])
+        self.assertEqual([log['body'] for log in self.logs()],
+                         [obs.WORKFLOW_MESSAGES['started'], obs.WORKFLOW_MESSAGES['failed']])
+        self.assertTrue(all(log['trace_id'] == p['contexts']['trace']['trace_id'] for log in self.logs()))
         self.assert_safe()
 
-    def test_all_automatic_capture_profiles_logs_sessions_propagation_disabled(self):
+    def test_automatic_capture_disabled_only_scrubbed_manual_logs_enabled(self):
         client = sentry_sdk.get_client()
         self.assertEqual(client.integrations, {})
         for option in ('default_integrations', 'auto_enabling_integrations', 'include_local_variables',
                        'include_source_context', 'attach_stacktrace', 'auto_session_tracking',
-                       'enable_logs', 'enable_metrics', 'propagate_traces', 'stream_gen_ai_spans',
+                       'enable_metrics', 'propagate_traces', 'stream_gen_ai_spans',
                        'send_client_reports', 'enable_backpressure_handling'):
             self.assertFalse(client.options[option], option)
+        self.assertTrue(client.options['enable_logs'])
+        self.assertIs(client.options['before_send_log'], obs._scrub_log)
         for option in ('profiles_sample_rate', 'profile_session_sample_rate', 'max_breadcrumbs'):
             self.assertEqual(client.options[option], 0)
         self.assertEqual(client.options['trace_propagation_targets'], [])
@@ -158,6 +177,178 @@ class PrivacyTests(unittest.TestCase):
         finally:
             logger.removeHandler(handler)
         self.assertEqual(self.payloads(), [])
+        sentry_logger.info(CANARY, attributes={'private': CANARY})
+        self.assertEqual(self.logs(), [])
+
+    def test_successful_workflows_log_only_static_fields_with_root_correlation(self):
+        self.contaminate()
+        for name in obs.TRANSACTIONS:
+            with obs.start_agent_transaction(name, {'property': CANARY}):
+                with obs.start_span('discovery.scan', obs.STEPS['discovery.scan'], {'input': CANARY}):
+                    pass
+        transactions = self.payloads()
+        logs = self.logs()
+        self.assertEqual(len(transactions), len(obs.TRANSACTIONS))
+        self.assertEqual(len(logs), 2 * len(obs.TRANSACTIONS))
+        for i, transaction in enumerate(transactions):
+            trace = transaction['contexts']['trace']
+            self.assertEqual(trace['status'], 'ok')
+            self.assertEqual(transaction['spans'][0]['status'], 'ok')
+            self.assertIn('timestamp', transaction)
+            self.assertIn('start_timestamp', transaction)
+            for log, phase in zip(logs[2*i:2*i+2], ('started', 'completed')):
+                self.assertEqual(log['trace_id'], trace['trace_id'])
+                self.assertEqual(log['span_id'], trace['span_id'])
+                self.assertEqual(log['body'], obs.WORKFLOW_MESSAGES[phase])
+                self.assertEqual(log['level'], 'info')
+                self.assertEqual(log['attributes']['retailscope.workflow']['value'], transaction['transaction'])
+                self.assertEqual(set(log['attributes']), {
+                    'retailscope.workflow', 'retailscope.phase', 'retailscope.telemetry',
+                    'sentry.environment', 'sentry.release', 'sentry.severity_number', 'sentry.severity_text'})
+        self.assert_safe()
+
+    def test_caught_failure_keeps_failed_status_and_child_error_link(self):
+        self.contaminate()
+        with obs.start_agent_transaction('retailscope_ai.discovery_source'):
+            with obs.start_span('discovery.scan', obs.STEPS['discovery.scan']):
+                child = sentry_sdk.get_current_scope().span
+                obs.capture_exception(ValueError(CANARY))
+        error, transaction = self.payloads()
+        self.assertEqual(error['contexts']['trace']['span_id'], child.span_id)
+        self.assertEqual(error['contexts']['trace']['trace_id'], transaction['contexts']['trace']['trace_id'])
+        self.assertEqual(transaction['contexts']['trace']['status'], 'internal_error')
+        self.assertEqual(transaction['spans'][0]['status'], 'internal_error')
+        self.assertEqual([log['body'] for log in self.logs()],
+                         [obs.WORKFLOW_MESSAGES['started'], obs.WORKFLOW_MESSAGES['failed']])
+        self.assert_safe()
+
+    def test_captured_then_rethrown_error_is_not_duplicated(self):
+        with self.assertRaises(ValueError):
+            with obs.start_agent_transaction('retailscope_ai.mcp.get_context'):
+                try:
+                    raise ValueError(CANARY)
+                except ValueError as exc:
+                    obs.capture_exception(exc)
+                    raise
+        self.assertEqual(len(self.payloads()), 2)
+        self.assertEqual(len(self.logs()), 2)
+        self.assert_safe()
+
+    def test_sdk_log_and_capture_failures_do_not_break_or_replace_application_behavior(self):
+        with patch.object(obs.sentry_logger, 'info', side_effect=RuntimeError(CANARY)), \
+             patch.object(obs.sentry_logger, 'error', side_effect=RuntimeError(CANARY)), \
+             patch.object(sentry_sdk, 'capture_event', side_effect=RuntimeError(CANARY)):
+            with obs.start_agent_transaction('retailscope_ai.mcp.list_centers'):
+                result = 42
+            self.assertEqual(result, 42)
+            original = ValueError('application failure')
+            with self.assertRaises(ValueError) as caught:
+                with obs.start_agent_transaction('retailscope_ai.mcp.get_context'):
+                    raise original
+            self.assertIs(caught.exception, original)
+        self.assertEqual([p['contexts']['trace']['status'] for p in self.payloads()],
+                         ['ok', 'internal_error'])
+        self.assertEqual(self.logs(), [])
+        self.assert_safe()
+
+    def test_owned_client_and_log_correlation_work_in_source_worker_threads(self):
+        self.contaminate()
+        def worker(fail):
+            self.assertTrue(obs._enabled())
+            with obs.start_agent_transaction('retailscope_ai.discovery_source', {'source': CANARY}):
+                with obs.start_span('discovery.scan', obs.STEPS['discovery.scan']):
+                    if fail:
+                        raise ValueError(CANARY)
+                with obs.start_span('discovery.screen', obs.STEPS['discovery.screen']):
+                    pass
+        with obs.start_agent_transaction('retailscope_ai.discovery'):
+            parent_id = sentry_sdk.get_current_scope().span.trace_id
+            with ThreadPoolExecutor(max_workers=3) as pool:
+                results = [pool.submit(worker, fail) for fail in (False, True, False)]
+                for future, fail in zip(results, (False, True, False)):
+                    if fail:
+                        with self.assertRaises(ValueError):
+                            future.result()
+                    else:
+                        future.result()
+        transactions = [p for p in self.payloads() if p.get('type') == 'transaction']
+        errors = [p for p in self.payloads() if p.get('level') == 'error']
+        self.assertEqual(len(transactions), 4)
+        self.assertEqual(len(errors), 1)
+        self.assertEqual(len({p['contexts']['trace']['trace_id'] for p in transactions}), 4)
+        logs = self.logs()
+        self.assertEqual(len(logs), 8)
+        for transaction in transactions:
+            trace = transaction['contexts']['trace']
+            phases = [log['attributes']['retailscope.phase']['value']
+                      for log in logs if log['trace_id'] == trace['trace_id']]
+            self.assertEqual(phases, ['started', 'failed' if trace['status'] == 'internal_error' else 'completed'])
+        failed = next(p for p in transactions if p['contexts']['trace']['status'] == 'internal_error')
+        self.assertEqual(errors[0]['contexts']['trace']['trace_id'], failed['contexts']['trace']['trace_id'])
+        self.assertNotEqual(errors[0]['contexts']['trace']['trace_id'], parent_id)
+        self.assert_safe()
+
+    def test_log_hook_rebuilds_marker_spoofed_payload_and_drops_unknown_logs(self):
+        log = {'body': obs.WORKFLOW_MESSAGES['started'], 'severity_text': CANARY,
+               'severity_number': 99, 'time_unix_nano': 1,
+               'trace_id': 'a'*32, 'span_id': 'b'*16, 'private': CANARY,
+               'attributes': {'retailscope.telemetry': 'workflow',
+                              'retailscope.workflow': 'retailscope_ai.answer',
+                              'retailscope.phase': 'started', 'property': CANARY,
+                              'sentry.environment': CANARY, 'sentry.release': CANARY}}
+        safe = obs._scrub_log(log, {})
+        self.assertNotIn(CANARY, json.dumps(safe))
+        self.assertEqual(safe['severity_text'], 'info')
+        for key, value in (('body', CANARY), ('trace_id', CANARY), ('span_id', CANARY),
+                           ('time_unix_nano', True), ('time_unix_nano', -1), ('attributes', [])):
+            self.assertIsNone(obs._scrub_log(dict(log, **{key: value}), {}))
+        for key in ('retailscope.workflow', 'retailscope.phase', 'retailscope.telemetry'):
+            attrs = dict(log['attributes'], **{key: CANARY})
+            self.assertIsNone(obs._scrub_log(dict(log, attributes=attrs), {}))
+        self.contaminate()
+        with obs.start_agent_transaction('retailscope_ai.answer'):
+            sentry_logger.info(CANARY, attributes=log['attributes'])
+        self.assertEqual(len(self.logs()), 2)
+        self.assert_safe()
+
+    def test_error_trace_hook_drops_unknown_ops_and_private_context_fields(self):
+        raw = {'tags': {'retailscope.telemetry': 'operation_error'}, 'transaction': CANARY,
+               'contexts': {'trace': {'op': 'mcp.server', 'trace_id': 'a'*32, 'span_id': 'b'*16,
+                                     'status': 'internal_error', 'private': CANARY,
+                                     'dynamic_sampling_context': {'private': CANARY}},
+                            'private': {'data': CANARY}}}
+        safe = obs._scrub_event(raw, {})
+        self.assertEqual(safe['contexts']['trace'], {'op': 'mcp.server', 'trace_id': 'a'*32,
+                         'span_id': 'b'*16, 'status': 'internal_error'})
+        self.assertNotIn(CANARY, json.dumps(safe))
+        raw['contexts']['trace']['op'] = CANARY
+        self.assertNotIn('contexts', obs._scrub_event(raw, {}))
+
+    def test_runtime_labels_and_sha_release_are_fixed_and_scrubbed_consistently(self):
+        for runtime, env_vars, expected_environment, expected_release in (
+                ('local', {'SENTRY_ENVIRONMENT': CANARY, 'SENTRY_RELEASE': CANARY}, 'application', obs.RELEASE),
+                ('container', {'RETAILSCOPE_PUBLIC_DEMO': 'true'}, 'render-demo', obs.RELEASE),
+                ('local', {'RENDER': 'true', 'RENDER_GIT_COMMIT': 'A'*40}, 'render-demo', 'a'*40),
+                ('render', {'RENDER_GIT_COMMIT': CANARY, 'GITHUB_SHA': 'b'*40}, 'render-demo', 'b'*40),
+                ('local', {'GITHUB_SHA': 'b'*39}, 'application', obs.RELEASE),
+                ('local', {'GITHUB_SHA': 'b'*40+'\n'}, 'application', obs.RELEASE)):
+            self.clear_clients()
+            with patch.dict(os.environ, env_vars, clear=True):
+                self.assertTrue(obs.init_sentry(runtime=runtime, dsn=DSN, traces_sample_rate=1,
+                                                transport=self.transport))
+                client = sentry_sdk.get_client()
+                self.assertEqual(client.options['environment'], expected_environment)
+                self.assertEqual(client.options['release'], expected_release)
+                with obs.start_agent_transaction('retailscope_ai.mcp.list_centers'):
+                    pass
+                payload = self.payloads()[-1]
+                self.assertEqual(payload['environment'], expected_environment)
+                self.assertEqual(payload['release'], expected_release)
+                log = self.logs()[-1]
+                self.assertEqual(log['attributes']['sentry.environment']['value'], expected_environment)
+                self.assertEqual(log['attributes']['sentry.release']['value'], expected_release)
+        self.assertEqual(obs._runtime_labels('warehouse')[0], 'snowflake')
+        self.assert_safe()
 
     def test_hooks_reconstruct_even_marker_spoofed_raw_event(self):
         self.contaminate()

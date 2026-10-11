@@ -114,12 +114,12 @@ The app initializes Sentry when `SENTRY_DSN` is set or when secrets include:
 ```toml
 [sentry]
 dsn = "https://..."
-environment = "local"
 traces_sample_rate = 0.2
-profiles_sample_rate = 0.0
 ```
 
-Sentry uses static operation names, generated trace IDs, timing and fixed status values. SDK automatic AI capture, logs, profiles, sessions, request bodies and local variables are disabled. Both error events and transaction payloads are reconstructed from an allowlist. Configuration is optional; initialization does not prove remote delivery. The privacy wrapper is tested offline with real SDK2.67.1 and2.71.0; target-account delivery is unverified.
+Sentry records MCP workflows, valuation calculations, research answers, and cached background discovery. Workflow traces contain timed steps and completion status. Structured lifecycle logs and sanitized operational errors link to their trace. Prompts, responses, property records, credentials, raw exception messages, profiles, and session capture are excluded; outbound payloads are reconstructed from an allowlist.
+
+On Render, configure `SENTRY_DSN`, `RETAILSCOPE_RUNTIME=container`, and `SENTRY_TRACES_SAMPLE_RATE=1.0` for complete demo tracing. The environment identifies Render demo traffic separately from local and Snowflake traffic. A supported deployment commit SHA identifies the release. Snowflake reads its managed `SENTRY_DSN` secret alias. Configuration is optional; verify delivery by exercising a workflow and finding its trace and lifecycle logs in Sentry.
 
 ## Deployment Options
 

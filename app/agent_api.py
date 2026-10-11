@@ -103,7 +103,8 @@ def _load_agent_dataset() -> PropertyDataset:
     require_live = bool(cfg.get("account") or cfg.get("user")) or os.getenv(
         "RETAILSCOPE_REQUIRE_SNOWFLAKE", ""
     ).lower() in {"1", "true", "yes"}
-    return load_dataset(require_snowflake=require_live)
+    with start_span("db.load", "Load shopping center dataset"):
+        return load_dataset(require_snowflake=require_live)
 
 
 def _records(df: pd.DataFrame) -> list[dict[str, Any]]:

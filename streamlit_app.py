@@ -9,7 +9,7 @@ from app.research_ui import render_research
 from app.deal_radar_ui import render_deal_radar
 from app.presentation import apply_presentation, navigation, render_analysis_header, render_analysis_mode
 from app.data_access import load_dataset, get_snowflake_config
-from app.observability import init_sentry, set_agent_context, start_span
+from app.observability import init_sentry, set_agent_context, start_span, start_agent_transaction
 from app.mcp_landing import render_mcp_landing
 from app.services.cortex import answer_agent
 from app.services.valuation import ValuationResult, build_valuation
@@ -66,16 +66,15 @@ def _render_workspace() -> None:
         str(property_row["name"]),
         dataset.source,
     )
-    with start_span(
-        "app.valuation",
-        "Build commercial real estate valuation",
-        {"property_id": str(property_row["property_id"])},
-    ):
-        try:
+    try:
+        with start_agent_transaction("retailscope_ai.calculation"), start_span(
+            "app.valuation",
+            "Build commercial real estate valuation",
+        ):
             valuation = build_valuation(property_row, tenants, market, comps)
-        except (ValueError, KeyError, TypeError, OverflowError):
-            st.error("Dataset inputs are incomplete or invalid. Correct the data before calculating.")
-            st.stop()
+    except (ValueError, KeyError, TypeError, OverflowError):
+        st.error("Dataset inputs are incomplete or invalid. Correct the data before calculating.")
+        st.stop()
 
     render_analysis_mode(dataset.source)
     render_research(str(property_row["city"]) + ", " + str(property_row["state"]))

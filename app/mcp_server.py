@@ -11,7 +11,7 @@ from app.agent_api import (
     get_property_context,
     list_properties,
 )
-from app.observability import init_sentry
+from app.observability import init_sentry, start_agent_transaction
 
 
 mcp = FastMCP(
@@ -28,19 +28,22 @@ mcp = FastMCP(
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True))
 def list_shopping_centers() -> list[dict[str, Any]]:
     """List available shopping centers and their core acquisition metrics."""
-    return list_properties()
+    with start_agent_transaction("retailscope_ai.mcp.list_centers"):
+        return list_properties()
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True))
 def get_shopping_center_context(property_id: str) -> dict[str, Any]:
     """Return property, tenant, market, comp, and valuation context for one center."""
-    return get_property_context(property_id)
+    with start_agent_transaction("retailscope_ai.mcp.get_context"):
+        return get_property_context(property_id)
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True))
 def appraise_shopping_center(property_id: str) -> dict[str, Any]:
     """Run the commercial shopping-center valuation model for one center."""
-    return appraise_property(property_id)
+    with start_agent_transaction("retailscope_ai.mcp.appraise"):
+        return appraise_property(property_id)
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=False))
