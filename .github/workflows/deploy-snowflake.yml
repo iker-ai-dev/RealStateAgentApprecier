@@ -57,6 +57,9 @@ jobs:
           print("smoke ok")
           PY
 
+      - name: Run offline integration tests
+        run: python -m unittest discover -s tests -v
+
   deploy:
     name: Deploy to Snowflake
     runs-on: ubuntu-latest

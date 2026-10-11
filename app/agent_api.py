@@ -1,18 +1,19 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+import os
 from typing import Any
 
 import pandas as pd
 
-from app.data_access import PropertyDataset, load_dataset
+from app.data_access import PropertyDataset, get_snowflake_config, load_dataset
 from app.observability import set_agent_context, start_span
 from app.services.cortex import answer_agent
 from app.services.valuation import ValuationResult, build_valuation
 
 
 def list_properties() -> list[dict[str, Any]]:
-    dataset = load_dataset()
+    dataset = _load_agent_dataset()
     rows = []
     for row in dataset.properties.itertuples():
         rows.append(
@@ -71,7 +72,7 @@ def ask_property_agent(property_id: str, question: str) -> dict[str, Any]:
 def load_property_analysis(
     property_id: str,
 ) -> tuple[PropertyDataset, pd.Series, pd.DataFrame, pd.Series, pd.DataFrame, ValuationResult]:
-    dataset = load_dataset()
+    dataset = _load_agent_dataset()
     normalized_id = property_id.strip()
     matches = dataset.properties.loc[dataset.properties["property_id"] == normalized_id]
     if matches.empty:
@@ -95,6 +96,14 @@ def load_property_analysis(
 
 def valuation_to_dict(valuation: ValuationResult) -> dict[str, Any]:
     return _json_safe(asdict(valuation))
+
+
+def _load_agent_dataset() -> PropertyDataset:
+    cfg = get_snowflake_config()
+    require_live = bool(cfg.get("account") or cfg.get("user")) or os.getenv(
+        "RETAILSCOPE_REQUIRE_SNOWFLAKE", ""
+    ).lower() in {"1", "true", "yes"}
+    return load_dataset(require_snowflake=require_live)
 
 
 def _records(df: pd.DataFrame) -> list[dict[str, Any]]:

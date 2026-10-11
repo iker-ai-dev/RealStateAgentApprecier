@@ -2,18 +2,20 @@ from __future__ import annotations
 
 import json
 import os
-from contextlib import contextmanager
+import math
 from dataclasses import dataclass
 from datetime import date
-from typing import Any, Iterator
 
 import pandas as pd
 import streamlit as st
 
-try:
-    import sentry_sdk
-except Exception:  # pragma: no cover - optional Snowflake package
-    sentry_sdk = None
+from app.observability import init_sentry, start_agent_transaction
+from app.acquisition_policy import (GATE, DISCLAIMER, context_fingerprint, validate_model_inputs, diligence_flags, render_research_answer)
+from app.services.topic_router import route_topic
+from app.data_access import get_snowflake_config
+from app.research_ui import render_research
+from app.deal_radar_ui import render_deal_radar
+from app.presentation import apply_presentation, navigation, render_analysis_header, render_analysis_mode
 
 
 PROPERTY_ROWS = [
@@ -115,154 +117,35 @@ class ValuationResult:
     risks: list[str]
     opportunities: list[str]
 
+    def __post_init__(self):
+        for value in self.__dict__.values():
+            if isinstance(value, (int, float)) and not math.isfinite(value):
+                raise ValueError("Illustrative model produced a nonfinite value; correct inputs.")
+
+
 
 st.set_page_config(page_title="RetailScope AI", page_icon="RS", layout="wide")
 
-SENTRY_ENABLED = False
 
 
-CSS = """
-<style>
-.block-container { padding-top: 1.25rem; max-width: 1480px; }
-[data-testid="stMetric"] { background: #fff; border: 1px solid #d9ddd5; border-radius: 8px; padding: 12px 14px; min-height: 96px; }
-[data-testid="stMetricLabel"] p { color: #4f5c57; font-size: 0.82rem; }
-[data-testid="stMetricValue"] { color: #17211f; font-size: 1.45rem; }
-.badge { display: inline-flex; border-radius: 999px; border: 1px solid #bed4cd; background: #eaf3ef; color: #126c67; padding: 4px 9px; font-size: .78rem; font-weight: 650; }
-.subtitle { color: #59665f; margin: .35rem 0 1rem; }
-.section-label { color: #43504b; font-size: .78rem; font-weight: 700; margin: 1rem 0 .35rem; text-transform: uppercase; }
-.note { color: #64716c; font-size: .86rem; }
-.copy-label { color: #43504b; font-size: .82rem; font-weight: 700; margin-top: .35rem; text-transform: uppercase; }
-</style>
-"""
-
-
-def init_sentry() -> bool:
-    if sentry_sdk is None:
-        return False
-    if sentry_sdk.is_initialized():
-        return True
-
-    dsn = get_sentry_dsn()
-    if not dsn:
-        return False
-
-    sentry_sdk.init(
-        dsn=dsn,
-        environment=get_config_value("SENTRY_ENVIRONMENT", "snowflake"),
-        release=get_config_value("SENTRY_RELEASE", None),
-        traces_sample_rate=float(get_config_value("SENTRY_TRACES_SAMPLE_RATE", "0.2")),
-        profiles_sample_rate=float(get_config_value("SENTRY_PROFILES_SAMPLE_RATE", "0.0")),
-        send_default_pii=False,
-        before_send=scrub_event,
-    )
-    return True
-
-
-def get_sentry_dsn() -> str | None:
-    value = get_config_value("SENTRY_DSN", None)
-    if value:
-        return value
-
-    try:
-        from _snowflake import get_generic_secret_string
-
-        return get_generic_secret_string("SENTRY_DSN")
-    except Exception:
-        return None
-
-
-def get_config_value(name: str, default: str | None) -> str | None:
-    if os.getenv(name):
-        return os.getenv(name)
-    try:
-        value = st.secrets.get(name)
-        if value:
-            return str(value)
-    except Exception:
-        pass
-    try:
-        sentry_config = st.secrets.get("sentry", {})
-        key = name.removeprefix("SENTRY_").lower()
-        if key in sentry_config:
-            return str(sentry_config[key])
-    except Exception:
-        pass
-    return default
-
-
-def set_agent_context(property_id: str, property_name: str, data_source: str) -> None:
-    if sentry_sdk is None or not sentry_sdk.is_initialized():
-        return
-    sentry_sdk.set_tag("agent.kind", "retailscope-ai")
-    sentry_sdk.set_tag("property.id", property_id)
-    sentry_sdk.set_tag("data.source", data_source)
-    sentry_sdk.set_context(
-        "property",
-        {"id": property_id, "name": property_name, "data_source": data_source},
-    )
-
-
-@contextmanager
-def start_span(op: str, name: str, data: dict[str, Any] | None = None) -> Iterator[Any]:
-    if sentry_sdk is None or not sentry_sdk.is_initialized():
-        yield None
-        return
-    with sentry_sdk.start_span(op=op, name=name) as span:
-        if data:
-            for key, value in data.items():
-                span.set_data(key, value)
-        yield span
-
-
-@contextmanager
-def start_agent_transaction(name: str, data: dict[str, Any] | None = None) -> Iterator[Any]:
-    if sentry_sdk is None or not sentry_sdk.is_initialized():
-        yield None
-        return
-    with sentry_sdk.start_transaction(op="ai.pipeline", name=name) as transaction:
-        if data:
-            for key, value in data.items():
-                transaction.set_data(key, value)
-        yield transaction
-
-
-def capture_exception(exc: Exception) -> None:
-    if sentry_sdk is not None and sentry_sdk.is_initialized():
-        sentry_sdk.capture_exception(exc)
-
-
-def scrub_event(event: dict[str, Any], hint: dict[str, Any]) -> dict[str, Any]:
-    return scrub_value(event)
-
-
-def scrub_value(value: Any) -> Any:
-    sensitive = {"password", "token", "secret", "dsn", "authorization", "cookie", "question", "prompt", "messages", "tenant", "tenants"}
-    if isinstance(value, dict):
-        return {
-            key: "[Filtered]" if str(key).lower() in sensitive else scrub_value(item)
-            for key, item in value.items()
-        }
-    if isinstance(value, list):
-        return [scrub_value(item) for item in value]
-    return value
 
 
 def main() -> None:
-    global SENTRY_ENABLED
-    SENTRY_ENABLED = init_sentry()
-    st.markdown(CSS, unsafe_allow_html=True)
-    page = st.navigation(
-        [
-            st.Page(render_underwriting_desk, title="Underwriting Desk", default=True),
-            st.Page(render_mcp_install_page, title="MCP Install", url_path="landing"),
-        ]
-    )
+    apply_presentation()
+    init_sentry()
+    page = st.navigation([
+        st.Page(render_workspace, title="RetailScope AI", default=True),
+        st.Page(render_mcp_install_page, title="MCP Install", url_path="landing"),
+    ])
     page.run()
 
 
-def render_underwriting_desk() -> None:
-    with start_span("db.load", "Load shopping center dataset"):
-        properties, tenants_all, markets, comps_all, source = load_data()
+def render_workspace() -> None:
+    if navigation() == "Find deals":
+        render_deal_radar()
+        return
+    render_analysis_header()
+    properties, tenants_all, markets, comps_all, source = load_data()
 
     options = {
         f"{row.name} · {row.city}, {row.state}": row.property_id
@@ -270,12 +153,8 @@ def render_underwriting_desk() -> None:
     }
     header, selector = st.columns([0.72, 0.28], vertical_alignment="center")
     with header:
-        st.markdown('<span class="badge">Snowflake Deployment</span>', unsafe_allow_html=True)
-        st.title("RetailScope AI")
-        st.markdown(
-            '<div class="subtitle">AI-powered shopping-center underwriting for rents, trade areas, comps, and acquisition value.</div>',
-            unsafe_allow_html=True,
-        )
+        st.subheader("Selected center")
+        st.caption("Inspect supplied records and illustrative model assumptions.")
     with selector:
         selected_label = st.selectbox("Shopping center", list(options.keys()), label_visibility="collapsed")
 
@@ -284,11 +163,17 @@ def render_underwriting_desk() -> None:
     tenants = tenants_all.loc[tenants_all["property_id"] == selected_id].copy()
     market = markets.loc[markets["property_id"] == selected_id].iloc[0]
     comps = comps_all.loc[comps_all["property_id"] == selected_id].copy()
-    set_agent_context(str(property_row["property_id"]), str(property_row["name"]), source)
-    with start_span("app.valuation", "Build commercial real estate valuation", {"property_id": str(property_row["property_id"])}):
+    try:
         valuation = build_valuation(property_row, tenants, market, comps)
+    except (ValueError, KeyError, TypeError, OverflowError):
+        st.error("Dataset inputs are incomplete or invalid. Correct the property/rent/comparison data before calculating.")
+        st.stop()
+    render_analysis_mode(source)
+    render_research(str(property_row["city"]) + ", " + str(property_row["state"]))
 
-    if st.session_state.get("active_property_id") != selected_id:
+    fingerprint = context_fingerprint(property_row, tenants, market, comps, source)
+    if st.session_state.get("active_context_fingerprint") != fingerprint:
+        st.session_state.active_context_fingerprint = fingerprint
         st.session_state.active_property_id = selected_id
         st.session_state.messages = [
             {
@@ -315,12 +200,14 @@ def load_data() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame,
                 "markets": "SHOPPING_CENTER_MARKETS",
                 "comps": "SHOPPING_CENTER_SALES_COMPS",
             }
-            data = {name: normalize(session.table(table).to_pandas()) for name, table in tables.items()}
+            data = {name: normalize(session.table(table).limit(10001).to_pandas()) for name, table in tables.items()}
+            if any(len(frame) > 10000 for frame in data.values()):
+                raise ValueError("Dataset exceeds bounded demo load.")
             data["tenants"]["lease_end"] = pd.to_datetime(data["tenants"]["lease_end"])
             data["comps"]["sale_date"] = pd.to_datetime(data["comps"]["sale_date"])
             return data["properties"], data["tenants"], data["markets"], data["comps"], "Snowflake tables"
         except Exception:
-            pass
+            st.warning("Snowflake tables could not be loaded; explicitly using synthetic demo data.")
 
     properties = pd.DataFrame(PROPERTY_ROWS)
     tenants = pd.DataFrame(
@@ -351,7 +238,9 @@ def get_session():
 
 def render_chat(property_row, tenants, market, comps, valuation) -> None:
     st.subheader("Agent Chat")
-    st.caption("Powered by Snowflake Cortex when available, with deterministic underwriting fallback.")
+    model = get_snowflake_config().get("cortex_model", "")
+    configured = isinstance(model, str) and bool(model.strip())
+    st.caption("Hackathon Cortex model configured. Financial facts are host-rendered." if configured else "Hackathon model not configured. Deterministic fallback; no LLM generation.")
 
     examples = [
         "Should we acquire this center at asking price?",
@@ -374,34 +263,28 @@ def render_chat(property_row, tenants, market, comps, valuation) -> None:
 
 def submit_question(question, property_row, tenants, market, comps, valuation) -> None:
     st.session_state.messages.append({"role": "user", "content": question})
-    with start_agent_transaction(
-        "retailscope_ai.answer",
-        {
-            "property_id": str(property_row["property_id"]),
-            "question_length": len(question),
-            "tenant_count": int(len(tenants)),
-            "comp_count": int(len(comps)),
-        },
-    ):
-        with st.status("Underwriting the answer...", expanded=True) as status:
-            st.write("Reading property, rent roll, trade area, and comps.")
-            st.write("Running Cortex or local underwriting fallback.")
-            answer = answer_agent(question, property_row, tenants, market, comps, valuation)
-            status.update(label="Answer ready", state="complete", expanded=False)
+    with st.status("Underwriting the answer...", expanded=True) as status:
+        st.write("Reading property, rent roll, trade area, and comps.")
+        st.write("Running Cortex or local underwriting fallback.")
+        answer = answer_agent(question, property_row, tenants, market, comps, valuation)
+        status.update(label="Answer ready", state="complete", expanded=False)
     st.session_state.messages.append({"role": "assistant", "content": answer})
 
 
 def render_preview(property_row, tenants, market, comps, valuation, source) -> None:
     st.subheader(property_row["name"])
     st.caption(f"{property_row['address']}, {property_row['city']}, {property_row['state']} · Data source: {source}")
-    cols = st.columns(4)
-    cols[0].metric("Blended Value", money(valuation.blended_value), f"{valuation.equity_spread:.1%} vs ask")
+    cols = st.columns(2) + st.columns(2)
+    cols[0].metric("Illustrative Value", money(valuation.blended_value), f"{valuation.equity_spread:.1%} vs ask")
     cols[1].metric("Value / SF", f"${valuation.value_psf:,.0f}", f"{valuation.cap_rate:.2%} cap")
-    cols[2].metric("Stabilized NOI", money(valuation.stabilized_noi), f"{valuation.occupancy:.0%} occupied")
-    cols[3].metric("Market Rent", f"${valuation.market_rent_psf:,.2f}", f"${valuation.current_rent_psf:,.2f} in-place")
+    cols[2].metric("Illustrative NOI", money(valuation.stabilized_noi), f"{valuation.occupancy:.0%} supplied occupancy")
+    cols[3].metric("Heuristic Rent", f"${valuation.market_rent_psf:,.2f}", f"${valuation.current_rent_psf:,.2f} in-place")
 
     st.markdown('<div class="section-label">Acquisition Read</div>', unsafe_allow_html=True)
-    st.info(f"{valuation.recommendation}. Indicated value is {money(valuation.blended_value)} versus asking price of {money(valuation.asking_price)}.")
+    st.info(GATE + ". Legacy value spread is not an investor return.")
+    with st.expander("Evidence gaps and model diagnostics"):
+        for flag in diligence_flags(property_row, tenants):
+            st.caption(flag)
 
     tab_model, tab_rent, tab_market, tab_comps = st.tabs(["Model", "Rent Roll", "Market", "Comps"])
     with tab_model:
@@ -428,81 +311,36 @@ def render_preview(property_row, tenants, market, comps, valuation, source) -> N
     with tab_market:
         cols = st.columns(3)
         cols[0].metric("Population", f"{int(market['population']):,}", f"{market['trade_area_miles']} mi")
-        cols[1].metric("Median Income", money(float(market["median_income"])), f"{market['growth_5yr_pct']:.1f}% growth")
+        cols[1].metric("Median Income", money(float(market["median_income"])), "Vintage and dollar year unknown")
         cols[2].metric("Traffic Count", f"{int(market['traffic_count']):,}", f"Age {market['median_age']:.1f}")
     with tab_comps:
         st.dataframe(comps, hide_index=True, width="stretch")
 
 
 def answer_agent(question, property_row, tenants, market, comps, valuation) -> str:
-    session = get_session()
-    if session is not None:
-        try:
-            from snowflake.snowpark.functions import ai_complete
-
-            with start_span("ai.prompt.build", "Build appraisal prompt"):
-                payload = {
-                    "question": question,
-                    "property": series_dict(property_row),
-                    "tenants": records(tenants),
-                    "market": series_dict(market),
-                    "sales_comps": records(comps),
-                    "valuation": valuation.__dict__,
-                }
-                prompt = (
-                    "You are an institutional commercial real estate acquisition analyst. "
-                    "Use only the provided data. Be concise and cite metrics behind conclusions.\n\n"
-                    f"{json.dumps(payload, default=str)}"
-                )
-            with start_span(
-                "ai.chat_completions.create.snowflake_cortex",
-                "Snowflake Cortex ai_complete",
-                {"model": "claude-sonnet-5", "provider": "snowflake_cortex"},
-            ):
-                response = session.range(1).select(ai_complete("claude-sonnet-5", prompt).alias("response")).collect()[0][0]
-            return extract_text(response)
-        except Exception as exc:
-            capture_exception(exc)
-            st.caption(f"Cortex unavailable; using deterministic local analyst. Details: {exc}")
-    with start_span("ai.fallback", "Deterministic local appraisal answer", {"reason": "cortex_unavailable_or_unconfigured"}):
-        return answer_locally(question, property_row, tenants, market, comps, valuation)
+    with start_agent_transaction("retailscope_ai.answer"):
+        model = get_snowflake_config().get("cortex_model", "")
+        session = get_session() if isinstance(model, str) and model.strip() else None
+        topic, provider = route_topic(question, session, model)
+    return render_research_answer(topic, property_row, tenants, market, comps, valuation, provider=provider)
 
 
 def answer_locally(question, property_row, tenants, market, comps, valuation) -> str:
-    q = question.lower()
-    occupied = tenants[tenants["category"].str.lower() != "vacant"]
-    top = occupied.nlargest(3, "area_sf")
-    top_text = ", ".join(f"{row.tenant} at {int(row.area_sf):,} sf and ${row.rent_psf:,.2f}/sf" for row in top.itertuples())
-
-    if any(token in q for token in ("rent", "tenant", "rollover", "lease")):
-        return (
-            f"{property_row['name']} is {valuation.occupancy:.0%} occupied with in-place rent of "
-            f"${valuation.current_rent_psf:,.2f}/sf versus estimated market rent of ${valuation.market_rent_psf:,.2f}/sf. "
-            f"The largest tenants are {top_text}. Stabilized NOI is {money(valuation.stabilized_noi)}."
-        )
-    if any(token in q for token in ("demographic", "income", "population", "trade area")):
-        return (
-            f"The 3-mile trade area has {int(market['population']):,} people, median household income of "
-            f"{money(float(market['median_income']))}, {market['growth_5yr_pct']:.1f}% five-year growth, "
-            f"and traffic of {int(market['traffic_count']):,} vehicles per day."
-        )
-    return (
-        f"My indicated value is {money(valuation.blended_value)}, or ${valuation.value_psf:,.0f}/sf. "
-        f"Against asking price of {money(valuation.asking_price)}, the spread is {valuation.equity_spread:.1%}. "
-        f"Recommendation: {valuation.recommendation}. Key risks: {', '.join(valuation.risks[:2])}."
-    )
+    topic, provider = route_topic(question)
+    return render_research_answer(topic, property_row, tenants, market, comps, valuation, provider=provider)
 
 
 def build_valuation(property_row, tenants, market, comps) -> ValuationResult:
+    validate_model_inputs(property_row, tenants, market, comps)
     gla = float(property_row["gla_sf"])
     occupied = tenants[tenants["category"].str.lower() != "vacant"].copy()
     gross_rent = float((occupied["area_sf"] * occupied["rent_psf"]).sum())
-    vacancy_loss = gross_rent * max(0.02, 1 - float(property_row["occupancy_pct"]) / 100)
+    vacancy_loss = 0.0  # Occupied rent already excludes physical vacancy; collection loss is unknown.
     noi = gross_rent + gross_rent * 0.22 - vacancy_loss - gross_rent * 0.31
     current_rent_psf = weighted_average(occupied, "rent_psf", "area_sf")
     market_rent_psf = estimate_market_rent_psf(current_rent_psf, market, comps)
     vacant_area = float(tenants.loc[tenants["category"].str.lower() == "vacant", "area_sf"].sum())
-    stabilized_noi = noi + max(0, market_rent_psf - current_rent_psf) * float(occupied["area_sf"].sum()) * 0.62 + vacant_area * market_rent_psf * 0.62
+    stabilized_noi = noi + max(0, market_rent_psf - current_rent_psf) * float(occupied["area_sf"].sum()) * 0.62 + vacant_area * market_rent_psf * 0.88 * 0.62
     cap_rate = risk_adjusted_cap_rate(property_row, tenants, market, comps)
     cap_rate_value = stabilized_noi / cap_rate
     sales_comp_value = float(comps["price_psf"].median()) * gla
@@ -512,14 +350,7 @@ def build_valuation(property_row, tenants, market, comps) -> ValuationResult:
     equity_spread = (blended_value - asking_price) / asking_price
     risks = identify_risks(property_row, tenants, market, cap_rate)
     opportunities = identify_opportunities(current_rent_psf, market_rent_psf, tenants, market)
-    if equity_spread >= 0.12:
-        recommendation = "Acquire / strong upside"
-    elif equity_spread >= 0.03:
-        recommendation = "Pursue with price discipline"
-    elif equity_spread >= -0.05:
-        recommendation = "Market value / diligence heavy"
-    else:
-        recommendation = "Pass unless repriced"
+    recommendation = GATE
     return ValuationResult(noi, stabilized_noi, market_rent_psf, current_rent_psf, float(property_row["occupancy_pct"]) / 100, cap_rate, cap_rate_value, sales_comp_value, dcf_value, blended_value, blended_value / gla, asking_price, equity_spread, recommendation, risks, opportunities)
 
 
@@ -559,18 +390,21 @@ def identify_risks(property_row, tenants, market, cap_rate) -> list[str]:
         risks.append("trade-area income below preferred threshold")
     if cap_rate > 0.0675:
         risks.append("market requires a wider risk premium")
-    return risks or ["no single dominant red flag in current underwriting"]
+    unknown = pd.to_datetime(tenants.loc[tenants["category"].str.lower() != "vacant", "lease_end"], errors="coerce").isna().any()
+    if unknown:
+        risks.append("lease expiration evidence is incomplete; rollover exposure remains unknown")
+    return risks + ["unverified inputs and incomplete financial diligence prevent a risk-clearance conclusion"]
 
 
 def identify_opportunities(current_rent_psf, market_rent_psf, tenants, market) -> list[str]:
     opportunities = []
     if market_rent_psf > current_rent_psf * 1.05:
-        opportunities.append("mark below-market leases toward current rent")
+        opportunities.append("test the illustrative rent gap against executed lease comps and lease terms; below-market rent is not established")
     if tenants["category"].str.lower().eq("vacant").any():
-        opportunities.append("lease vacant suites to lift stabilized NOI")
+        opportunities.append("investigate vacant-suite demand, TI/LC and carry before assuming lease-up")
     if float(market["growth_5yr_pct"]) > 7:
-        opportunities.append("lean into household-growth-driven rent increases")
-    return opportunities or ["preserve occupancy and manage expenses tightly"]
+        opportunities.append("verify dated population trends and local retail demand; rent growth is not established")
+    return opportunities or ["no supported value-add thesis established; obtain operating and leasing evidence"]
 
 
 def near_term_rollover_pct(tenants) -> float:
@@ -605,25 +439,6 @@ def json_safe(value):
     if hasattr(value, "item"):
         return value.item()
     return value
-
-
-def extract_text(response) -> str:
-    if isinstance(response, str):
-        try:
-            parsed = json.loads(response)
-        except json.JSONDecodeError:
-            return response
-    else:
-        parsed = response
-    if isinstance(parsed, dict):
-        choices = parsed.get("choices")
-        if choices and isinstance(choices, list):
-            message = choices[0].get("messages") or choices[0].get("message") or choices[0].get("text")
-            if isinstance(message, dict):
-                return str(message.get("content", ""))
-            return str(message or "")
-        return str(parsed.get("response") or parsed.get("text") or parsed)
-    return str(parsed)
 
 
 def money(value) -> str:

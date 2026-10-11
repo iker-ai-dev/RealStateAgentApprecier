@@ -1,0 +1,68 @@
+Nimble MCP integration
+
+Endpoint: https://mcp.nimbleway.com/mcp
+Authentication: Bearer plus raw API key supplied by the caller's private secret store.
+No key is included in this repository. Imports read no credentials and make no calls.
+
+  from nimble_mcp import NimbleMCP
+  with NimbleMCP(private_key, max_results=3, max_search_calls=1) as client:
+      result = client.search(public_market_query)
+
+Returned content/structuredContent is untrusted source evidence. Record the query,
+retrieval timestamp, source URL, publication date and measurement period separately.
+A returned result does not prove any market claim or establish subject rents/NOI.
+
+Supported API:
+NimbleMCP(key, source_domains=(), max_results=5, max_search_calls=3,
+          timeout=(10,15), request_deadline=60, max_response_bytes=2000000,
+          max_tool_pages=5, transport=None)
+client.search(query, source_domains=None, max_results=None)
+client.close() is idempotent; prefer the context manager.
+client.protocol_version reports the negotiated supported revision.
+client.termination_status reports not_needed/terminated/unsupported/unverified.
+The constructor/search keyword options are keyword-only; see the Python signatures.
+
+Only initialize, initialized notification, tools/list, nimble_search and session
+cleanup are supported. No crawl, extraction, arbitrary tool calls, remote agent
+creation, sampling, elicitation, GET event streams or SSE replay is implemented.
+The adapter validates advertised input/output schemas without remote references.
+Unsupported required search inputs fail before a tool invocation. Site/domain terms
+guide discovery; they cannot guarantee source access, licensing or compliant URLs.
+
+Default limits: three attempted searches, twenty POST requests/workflow, five tool
+catalog pages/search, 1-10 results/search, 2 MB/response, 4000 base query characters.
+No automatic retry/replay occurs; a failed search may already consume provider credits.
+Connect/read timeouts and elapsed streaming checks are bounded, but socket/DNS waits
+are not a guaranteed hard wall-clock deadline. Redirects are disabled. Production
+Sessions disable environment proxies and implicit .netrc credentials. An injected
+Session can support explicitly approved proxy requirements and is closed by the client.
+Use one client per workflow/thread. Close clears auth/session headers. Static errors
+omit keys, prompts, source bodies, addresses and session IDs.
+
+The adapter supports handshake-based Streamable HTTP revisions 2025-11-25,
+2025-06-18 and 2025-03-26. It does not implement MCP2026-07-28's changed metadata-based
+protocol. An incompatible future server revision must fail clearly; changing only the
+version string is insufficient. Verify actual provider compatibility in deployment.
+
+partner_tools.py provides:
+- discover_markets(key, as_of, demographic_domains=(), projection_domains=(), retail_domains=())
+- research_strip_center(key, address, market, as_of, rent_domains=(), demographic_domains=(), trend_domains=())
+Each calls three explicit searches. Domain options are up to ten plain hostnames.
+Nationwide discovery separates measured historical income/population from official
+population projections and hypothetical income scenarios. An as-of phrase is a search
+term, not an enforced date filter. No property or market fact is inferred by a builder.
+
+Marketplace domains are not default sources. Public visibility is not extraction or
+storage permission. Use permitted official public records and broker publications;
+manual LoopNet/Crexi listing context is distinct from an authorized automated feed.
+Nimble usage may consume credits even when an underlying source is freely accessible.
+
+Local connector evidence does not certify Snowflake egress, source claims, a completed
+appraisal or a final acquisition decision. Test an explicitly budgeted public query
+from the target runtime and check returned URLs, dates, units and geographic scope.
+
+Official references:
+https://docs.nimbleway.com/integrations/mcp-server/mcp-server
+https://modelcontextprotocol.io/specification/2025-11-25/basic/transports
+https://modelcontextprotocol.io/specification/2025-11-25/basic/lifecycle
+https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http

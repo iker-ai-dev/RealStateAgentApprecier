@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from datetime import date
 
 import pandas as pd
+from app.acquisition_policy import GATE, validate_model_inputs, render_research_answer
+from app.services.topic_router import local_topic
 
 
 @dataclass(frozen=True)
@@ -26,6 +29,12 @@ class ValuationResult:
     risks: list[str]
     opportunities: list[str]
 
+    def __post_init__(self):
+        for value in self.__dict__.values():
+            if isinstance(value, (int, float)) and not math.isfinite(value):
+                raise ValueError("Illustrative model produced a nonfinite value; correct inputs.")
+
+
 
 def build_valuation(
     property_row: pd.Series,
@@ -33,12 +42,13 @@ def build_valuation(
     market: pd.Series,
     comps: pd.DataFrame,
 ) -> ValuationResult:
+    validate_model_inputs(property_row, tenants, market, comps)
     gla = float(property_row["gla_sf"])
     occupied = tenants[tenants["category"].str.lower() != "vacant"].copy()
 
     gross_rent = float((occupied["area_sf"] * occupied["rent_psf"]).sum())
     reimbursements = gross_rent * 0.22
-    vacancy_loss = gross_rent * max(0.02, 1 - float(property_row["occupancy_pct"]) / 100)
+    vacancy_loss = 0.0  # Physical vacancy is already excluded from occupied lease rent.
     operating_expenses = gross_rent * 0.31
     noi = gross_rent + reimbursements - vacancy_loss - operating_expenses
 
@@ -61,14 +71,7 @@ def build_valuation(
     risks = _identify_risks(property_row, tenants, market, cap_rate)
     opportunities = _identify_opportunities(current_rent_psf, market_rent_psf, tenants, market)
 
-    if equity_spread >= 0.12:
-        recommendation = "Acquire / strong upside"
-    elif equity_spread >= 0.03:
-        recommendation = "Pursue with price discipline"
-    elif equity_spread >= -0.05:
-        recommendation = "Market value / diligence heavy"
-    else:
-        recommendation = "Pass unless repriced"
+    recommendation = GATE
 
     return ValuationResult(
         property_id=str(property_row["property_id"]),
@@ -99,47 +102,7 @@ def answer_locally(
     comps: pd.DataFrame,
     valuation: ValuationResult,
 ) -> str:
-    q = question.lower()
-    largest_tenants = tenants[tenants["category"].str.lower() != "vacant"].nlargest(3, "area_sf")
-    top_tenant_text = ", ".join(
-        f"{row.tenant} at {int(row.area_sf):,} sf and ${row.rent_psf:,.2f}/sf"
-        for row in largest_tenants.itertuples()
-    )
-
-    if any(token in q for token in ("rent", "tenant", "rollover", "lease")):
-        return (
-            f"{property_row['name']} is {valuation.occupancy:.0%} occupied with in-place rent of "
-            f"${valuation.current_rent_psf:,.2f}/sf versus estimated market rent of "
-            f"${valuation.market_rent_psf:,.2f}/sf. The largest tenants are {top_tenant_text}. "
-            f"That supports stabilized NOI of {_money(valuation.stabilized_noi)}, assuming vacant space "
-            "is leased near market and tenant reimbursements stay in line."
-        )
-
-    if any(token in q for token in ("demographic", "income", "population", "trade area")):
-        return (
-            f"The 3-mile trade area has {int(market['population']):,} people, median household income of "
-            f"{_money(float(market['median_income']))}, {market['growth_5yr_pct']:.1f}% five-year growth, "
-            f"and traffic of {int(market['traffic_count']):,} vehicles per day. That profile supports "
-            "daily-needs tenancy and gives the center a healthier rent-growth story than a commodity strip."
-        )
-
-    if any(token in q for token in ("buy", "acquire", "return", "price", "value", "worth")):
-        return (
-            f"My indicated value is {_money(valuation.blended_value)}, or ${valuation.value_psf:,.0f}/sf. "
-            f"Against the asking price of {_money(valuation.asking_price)}, the spread is "
-            f"{valuation.equity_spread:.1%}. Recommendation: {valuation.recommendation}. "
-            f"The key watch items are {', '.join(valuation.risks[:2])}."
-        )
-
-    comp_summary = ", ".join(
-        f"{row.comp_name} at {row.cap_rate:.2%} cap"
-        for row in comps.sort_values("distance_miles").head(3).itertuples()
-    )
-    return (
-        f"I underwrite {property_row['name']} to {_money(valuation.blended_value)} using a "
-        f"{valuation.cap_rate:.2%} cap rate, sales comps, and a 10-year DCF. Nearby comps include "
-        f"{comp_summary}. The current read is: {valuation.recommendation}."
-    )
+    return render_research_answer(local_topic(question), property_row, tenants, market, comps, valuation)
 
 
 def _estimate_market_rent_psf(current_rent_psf: float, market: pd.Series, comps: pd.DataFrame) -> float:
@@ -183,7 +146,10 @@ def _identify_risks(
         risks.append("trade-area income below preferred threshold")
     if cap_rate > 0.0675:
         risks.append("market requires a wider risk premium")
-    return risks or ["no single dominant red flag in the current underwriting"]
+    unknown = pd.to_datetime(tenants.loc[tenants["category"].str.lower() != "vacant", "lease_end"], errors="coerce").isna().any()
+    if unknown:
+        risks.append("lease expiration evidence is incomplete; rollover exposure remains unknown")
+    return risks + ["unverified inputs and incomplete financial diligence prevent a risk-clearance conclusion"]
 
 
 def _identify_opportunities(
@@ -191,12 +157,12 @@ def _identify_opportunities(
 ) -> list[str]:
     opportunities = []
     if market_rent_psf > current_rent_psf * 1.05:
-        opportunities.append("mark below-market leases toward current rent")
+        opportunities.append("test the illustrative rent gap against executed lease comps and lease terms; below-market rent is not established")
     if tenants["category"].str.lower().eq("vacant").any():
-        opportunities.append("lease vacant suites to lift stabilized NOI")
+        opportunities.append("investigate vacant-suite demand, TI/LC and carry before assuming lease-up")
     if float(market["growth_5yr_pct"]) > 7:
-        opportunities.append("lean into household-growth-driven rent increases")
-    return opportunities or ["preserve occupancy and manage expenses tightly"]
+        opportunities.append("verify dated population trends and local retail demand; rent growth is not established")
+    return opportunities or ["no supported value-add thesis established; obtain operating and leasing evidence"]
 
 
 def _near_term_rollover_pct(tenants: pd.DataFrame) -> float:

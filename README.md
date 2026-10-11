@@ -1,6 +1,14 @@
+# Integration review status
+
+This branch is a draft integration. See [INTEGRATION_STATUS.txt](INTEGRATION_STATUS.txt) for known limits and target-runtime checks. No investment return engine or completed appraisal is claimed. Cortex routes research topics; host code renders financial facts. Public sample records and legacy heuristics remain unverified. Upload all repository modules for Snowflake deployment.
+
 # RetailScope AI
 
-RetailScope AI is a Streamlit app for exploring acquisition value on open-air commercial shopping centers. It pairs a chat UI with a right-side preview panel that updates with the current property's rent roll, market context, valuation model, and acquisition read.
+RetailScope AI is a Streamlit app for exploring acquisition value on open-air commercial shopping centers. It pairs a chat UI with a right-side preview panel, bounded public-evidence discovery, illustrative valuation and a needs-diligence gate.
+
+The default **Find deals** screen filters public listing leads by market, advertised price, reported vacancy, source and sourced income coverage. The initial seven records are broker assertions with unknown current availability, including one historical listing requiring an availability recheck. They are research leads, not qualified investments. Occupancy basis, vacancy hypotheses, counterevidence and missing documents are visible. County demographics are shown separately from property trade areas; future income is unknown.
+
+**Center analysis** preserves the chat and valuation tabs for the separate synthetic demo dataset. Selecting a listing never substitutes an unrelated demo rent roll. Current public evidence does not establish 20%+ equity IRR or the separate 6–7× equity-return goal across 5-, 7- and 10-year holds.
 
 The app runs locally with bundled sample data and can be pointed at Snowflake tables plus Snowflake Cortex when credentials are available.
 
@@ -57,7 +65,7 @@ property_table = "SHOPPING_CENTER_PROPERTIES"
 tenant_table = "SHOPPING_CENTER_TENANTS"
 market_table = "SHOPPING_CENTER_MARKETS"
 sales_comp_table = "SHOPPING_CENTER_SALES_COMPS"
-cortex_model = "claude-sonnet-5"
+cortex_model = "" # Set only to the model provisioned by the hackathon.
 ```
 
 The app expects these logical fields:
@@ -79,8 +87,10 @@ SNOWFLAKE_ROLE=...
 SNOWFLAKE_WAREHOUSE=...
 SNOWFLAKE_DATABASE=...
 SNOWFLAKE_SCHEMA=...
-SNOWFLAKE_CORTEX_MODEL=claude-sonnet-5
+SNOWFLAKE_CORTEX_MODEL=
 ```
+
+The model setting ships blank. No model is automatically chosen, and no provider request is made until a hackathon-provided Cortex model is configured. Blank configuration uses labeled deterministic research answers. Personal AI API keys are not used or required.
 
 ## Sentry Observability
 
@@ -94,7 +104,7 @@ traces_sample_rate = 0.2
 profiles_sample_rate = 0.0
 ```
 
-Sentry spans are emitted for dataset loading, valuation, prompt construction, Cortex calls, and local fallback responses. Raw prompts, tenant rows, secrets, and DSNs are filtered before events are sent.
+Sentry uses static operation names, generated trace IDs, timing and fixed status values. SDK automatic AI capture, logs, profiles, sessions, request bodies and local variables are disabled. Both error events and transaction payloads are reconstructed from an allowlist. Configuration is optional; initialization does not prove remote delivery. The privacy wrapper is tested offline with real SDK2.67.1 and2.71.0; target-account delivery is unverified.
 
 ## Deployment Options
 
@@ -105,7 +115,7 @@ Sentry spans are emitted for dataset loading, valuation, prompt construction, Co
 
 This repository includes a `Dockerfile` and `render.yaml` for container-based deployment.
 
-For fast Streamlit in Snowflake deployment, use `snowflake_streamlit_app.py` as a single-file entrypoint. It uses active Snowpark session data when the expected tables exist and falls back to embedded demo data otherwise.
+For Streamlit in Snowflake deployment, use `snowflake_streamlit_app.py` as the entrypoint and upload the complete repository modules. It uses active Snowpark session data when the expected tables exist and falls back to embedded demo data otherwise.
 
 ## CI/CD Deployment
 
@@ -129,12 +139,14 @@ The prepared service username is `RETAILSCOPE_DEPLOY`. An administrator must run
 
 MCP installation itself requires no credentials and initially uses bundled demo data. To query your Snowflake tables, configure the `SNOWFLAKE_*` connection variables on the machine running the MCP server. GitHub deployment secrets are not passed to installed MCP clients.
 
+For local key-pair access, set `SNOWFLAKE_AUTHENTICATOR=SNOWFLAKE_JWT` and `SNOWFLAKE_PRIVATE_KEY_FILE` to the private key path along with your connection settings. Configured MCP clients fail with a loading error instead of receiving synthetic data when Snowflake is unavailable or a table exceeds the bounded load. `RETAILSCOPE_REQUIRE_SNOWFLAKE=true` explicitly disables demo fallback for MCP.
+
 ## What The Agent Does
 
 - Answers acquisition questions against the selected center.
 - Shows the assumptions and intermediate math in the preview panel.
 - Estimates NOI, cap-rate value, price-per-square-foot value, DCF value, and a blended value.
-- Flags risks such as lease rollover, weak occupancy, low income density, or rent variance.
-- Uses Snowflake Cortex for narrative responses when configured, with deterministic local fallback when not.
+- Flags risks such as lease rollover, weak occupancy, missing income/density evidence, or rent variance.
+- Uses bounded structured Snowflake Cortex topic routing when available, with host-rendered research answers and a labeled deterministic fallback.
 
 This is a decision-support prototype, not a certified appraisal.

@@ -7,7 +7,11 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 
-from app.data_access import load_dataset
+from app.acquisition_policy import GATE, DISCLAIMER, context_fingerprint, diligence_flags
+from app.research_ui import render_research
+from app.deal_radar_ui import render_deal_radar
+from app.presentation import apply_presentation, navigation, render_analysis_header, render_analysis_mode
+from app.data_access import load_dataset, get_snowflake_config
 from app.observability import init_sentry, set_agent_context, start_span
 from app.services.cortex import answer_agent
 from app.services.valuation import ValuationResult, build_valuation
@@ -20,91 +24,23 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-SENTRY_ENABLED = init_sentry()
-
-
-CSS = """
-<style>
-    .block-container {
-        padding-top: 1.4rem;
-        padding-bottom: 1.2rem;
-        max-width: 1480px;
-    }
-    [data-testid="stMetric"] {
-        background: #ffffff;
-        border: 1px solid #d9ddd5;
-        border-radius: 8px;
-        padding: 12px 14px;
-        min-height: 96px;
-    }
-    [data-testid="stMetricLabel"] p {
-        color: #4f5c57;
-        font-size: 0.82rem;
-    }
-    [data-testid="stMetricValue"] {
-        color: #17211f;
-        font-size: 1.45rem;
-    }
-    .app-title {
-        display: flex;
-        align-items: center;
-        gap: .75rem;
-        margin-bottom: .35rem;
-    }
-    .app-title h1 {
-        font-size: 1.85rem;
-        margin: 0;
-        letter-spacing: 0;
-    }
-    .subtitle {
-        color: #59665f;
-        margin-bottom: 1rem;
-    }
-    .badge {
-        display: inline-flex;
-        align-items: center;
-        border-radius: 999px;
-        border: 1px solid #bed4cd;
-        background: #eaf3ef;
-        color: #126c67;
-        padding: 4px 9px;
-        font-size: .78rem;
-        font-weight: 650;
-    }
-    .section-label {
-        color: #43504b;
-        font-size: .78rem;
-        font-weight: 700;
-        margin: 1rem 0 .35rem 0;
-        text-transform: uppercase;
-    }
-    .note {
-        color: #64716c;
-        font-size: .86rem;
-    }
-    .copy-label {
-        color: #43504b;
-        font-size: .82rem;
-        font-weight: 700;
-        margin-top: .35rem;
-        text-transform: uppercase;
-    }
-</style>
-"""
 
 
 def main() -> None:
-    st.markdown(CSS, unsafe_allow_html=True)
-    page = st.navigation(
-        [
-            st.Page(_render_underwriting_desk, title="Underwriting Desk", default=True),
-            st.Page(_render_mcp_install_page, title="MCP Install", url_path="landing"),
-        ]
-    )
+    apply_presentation()
+    init_sentry()
+    page = st.navigation([
+        st.Page(_render_workspace, title="RetailScope AI", default=True),
+        st.Page(_render_mcp_install_page, title="MCP Install", url_path="landing"),
+    ])
     page.run()
 
 
-def _render_underwriting_desk() -> None:
+def _render_workspace() -> None:
+    if navigation() == "Find deals":
+        render_deal_radar()
+        return
+    render_analysis_header()
     with start_span("db.load", "Load shopping center dataset"):
         dataset = load_dataset()
 
@@ -115,18 +51,8 @@ def _render_underwriting_desk() -> None:
 
     top_left, top_right = st.columns([0.72, 0.28], vertical_alignment="center")
     with top_left:
-        st.markdown(
-            """
-            <div class="app-title">
-              <span class="badge">Acquisition Desk</span>
-              <h1>RetailScope AI</h1>
-            </div>
-            <div class="subtitle">
-              AI-powered shopping-center underwriting for rents, trade areas, comps, and acquisition value.
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+        st.subheader("Selected center")
+        st.caption("Inspect supplied records and illustrative model assumptions.")
     with top_right:
         selected_label = st.selectbox("Shopping center", list(property_options.keys()), label_visibility="collapsed")
 
@@ -147,9 +73,15 @@ def _render_underwriting_desk() -> None:
         "Build commercial real estate valuation",
         {"property_id": str(property_row["property_id"])},
     ):
-        valuation = build_valuation(property_row, tenants, market, comps)
+        try:
+            valuation = build_valuation(property_row, tenants, market, comps)
+        except (ValueError, KeyError, TypeError, OverflowError):
+            st.error("Dataset inputs are incomplete or invalid. Correct the data before calculating.")
+            st.stop()
 
-    _ensure_chat_state(selected_property_id)
+    render_analysis_mode(dataset.source)
+    render_research(str(property_row["city"]) + ", " + str(property_row["state"]))
+    _ensure_chat_state(context_fingerprint(property_row, tenants, market, comps, dataset.source))
 
     chat_col, preview_col = st.columns([0.53, 0.47], gap="large")
     with chat_col:
@@ -181,7 +113,10 @@ def _render_chat(
     valuation: ValuationResult,
 ) -> None:
     st.subheader("Agent Chat")
-    st.caption("Answers use the selected center, rent roll, trade area, sales comps, and underwriting model.")
+    model = get_snowflake_config().get("cortex_model", "")
+    configured = isinstance(model, str) and bool(model.strip())
+    st.caption("Hackathon Cortex model configured. Financial facts are host-rendered." if configured else
+               "Hackathon model not configured. Deterministic fallback; no LLM generation.")
 
     prompt_buttons = st.columns(3)
     examples = [
@@ -212,7 +147,7 @@ def _submit_question(
     valuation: ValuationResult,
 ) -> None:
     st.session_state.messages.append({"role": "user", "content": question})
-    with st.status("Underwriting the answer...", expanded=True) as status:
+    with st.status("Preparing a research answer...", expanded=True) as status:
         st.write("Reading the selected property context.")
         st.write("Running valuation and agent reasoning.")
         answer = answer_agent(question, property_row, tenants, market, comps, valuation)
@@ -231,14 +166,17 @@ def _render_preview(
     st.subheader(property_row["name"])
     st.caption(f"{property_row['address']}, {property_row['city']}, {property_row['state']} · Data source: {source}")
 
-    metric_cols = st.columns(4)
-    metric_cols[0].metric("Blended Value", _money(valuation.blended_value), f"{valuation.equity_spread:.1%} vs ask")
+    metric_cols = st.columns(2) + st.columns(2)
+    metric_cols[0].metric("Illustrative Value", _money(valuation.blended_value), f"{valuation.equity_spread:.1%} vs ask")
     metric_cols[1].metric("Value / SF", f"${valuation.value_psf:,.0f}", f"{valuation.cap_rate:.2%} cap")
-    metric_cols[2].metric("Stabilized NOI", _money(valuation.stabilized_noi), f"{valuation.occupancy:.0%} occupied")
-    metric_cols[3].metric("Market Rent", f"${valuation.market_rent_psf:,.2f}", f"${valuation.current_rent_psf:,.2f} in-place")
+    metric_cols[2].metric("Illustrative NOI", _money(valuation.stabilized_noi), f"{valuation.occupancy:.0%} supplied occupancy")
+    metric_cols[3].metric("Heuristic Rent", f"${valuation.market_rent_psf:,.2f}", f"${valuation.current_rent_psf:,.2f} in-place")
 
     st.markdown('<div class="section-label">Acquisition Read</div>', unsafe_allow_html=True)
-    st.info(f"{valuation.recommendation}. Indicated value is {_money(valuation.blended_value)} versus asking price of {_money(valuation.asking_price)}.")
+    st.info(GATE + ". Legacy value spread is not an investor return.")
+    with st.expander("Evidence gaps and model diagnostics"):
+        for flag in diligence_flags(property_row, tenants):
+            st.caption(flag)
 
     tabs = st.tabs(["Model", "Rent Roll", "Market", "Comps"])
     with tabs[0]:
@@ -315,12 +253,12 @@ def _render_rent_roll(tenants: pd.DataFrame) -> None:
 def _render_market_tab(market: pd.Series, valuation: ValuationResult) -> None:
     cols = st.columns(3)
     cols[0].metric("Population", f"{int(market['population']):,}", f"{market['trade_area_miles']} mi")
-    cols[1].metric("Median Income", _money(float(market["median_income"])), f"{market['growth_5yr_pct']:.1f}% growth")
+    cols[1].metric("Median Income", _money(float(market["median_income"])), "Vintage and dollar year unknown")
     cols[2].metric("Traffic Count", f"{int(market['traffic_count']):,}", f"Age {market['median_age']:.1f}")
     st.markdown(
         f"""
         <p class="note">
-        The model converts income, growth, traffic, occupancy, rollover, and comparable cap rates into a
+        The illustrative model uses unverified income, growth, occupancy, rollover and comparable cap rates for a
         risk-adjusted cap rate of <strong>{valuation.cap_rate:.2%}</strong>.
         </p>
         """,

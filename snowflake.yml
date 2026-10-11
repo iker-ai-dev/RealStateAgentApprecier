@@ -9,3 +9,6 @@ entities:
     main_file: snowflake_streamlit_app.py
     artifacts:
       - snowflake_streamlit_app.py
+      - app/
+      - nimble_mcp.py
+      - environment.yml

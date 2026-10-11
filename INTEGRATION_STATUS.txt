@@ -1,0 +1,58 @@
+RetailScope AI — proposed integration, not a production deployment
+
+Preserves the partner's chat-left / preview-right layout and existing property tabs.
+Adds explicit Nimble MCP search for a chosen public market or a nationwide growth query.
+Search runs only on the user's button click. No automatic or background searches.
+Search snippets remain discovery evidence; they never update financial inputs automatically.
+
+Known financial limitations:
+The legacy cap/comparison/10-year DCF calculations remain illustrative heuristics.
+Rent derived from household income and sales-price/SF is not a measured market rent.
+Recoveries, operating expenses, immediate rent uplift, lease-up factors and valuation
+weights remain unsupported assumptions. Physical vacancy no longer subtracts twice
+from occupied lease rent. Complete rent-roll area reconciliation is still missing in demo data.
+No dated equity cash-flow engine, debt schedule, verified T12 or executed leases is supplied.
+Therefore this version ALWAYS reports Needs diligence; no target fit or purchase recommendation.
+
+AI contract:
+Cortex is restricted to bounded structured topic routing. The host renders the answer
+from supplied facts and diligence flags; free-form LLM financial claims are not accepted.
+STRIP_CENTER_AGENT_PROMPT.txt is the proposed future research-agent specification;
+it is NOT a claim that the complete source-ledger/returns engine is implemented today.
+Missing/unavailable/malformed Cortex output produces a visibly labeled deterministic fallback.
+Model configuration ships blank; no provider call is made until the hackathon-provided
+Cortex model is explicitly configured. Personal AI API keys are not used or required.
+Model availability and live Cortex routing in the target Snowflake account are unverified.
+
+The default Find deals route now filters seven source-backed public review leads,
+with price/occupancy/source/income controls and a separate listing diligence view.
+Unknown active status, occupancy basis, master leases, owner delivery, historical
+availability and capital/demand risks remain explicit. This is not confirmed active
+inventory. County context is historical and separate from trade-area evidence.
+Public search is manual and bounded; search directories/reports do not count as
+property candidates. No financial facts are inferred from search snippets.
+
+Confirmed goals for the future engine:
+USD1-10m, nationwide US, open-air strip centers, some vacancy and existing tenants;
+value-add through leasing and rent growth. Compare5/7/10 years.
+20%+ annualized IRR INCLUDING sale, and a separate6-7x total cash returned / ALL equity
+invested goal. All initial/later capital contributions count.6-7x is not a hard ceiling.
+Report annual operating cash-on-cash separately. Support both sponsor/owner equity and
+outside investor net returns; fees/promote/waterfall/tax conventions must be explicit.
+
+Snowflake packaging:
+Upload the complete repository modules, not just snowflake_streamlit_app.py.
+The entrypoint now imports app/acquisition_policy.py, app/research_ui.py,
+app/observability.py, app/services/topic_router.py and nimble_mcp.py.
+Use a hackathon/team account and one canonical schema for the actual deployed app.
+Keep personal-account credentials out of this repository and deployment.
+Configure managed NIMBLE_API_KEY and SENTRY_DSN aliases through the deployment owner's
+approved private setup. Warehouse integration never falls back to local personal credentials.
+External access must explicitly allow mcp.nimbleway.com and the deployment's approved
+Sentry ingest host. No account grants/secret transfers/cloud writes have been performed.
+Verify dependency resolution, Cortex model/role access, bounded table loads, a live
+Nimble canary and a sanitized Sentry event/trace in the target runtime before deployment.
+
+Review status:
+Builder offline tests and supplemental Sol checks do not satisfy independent review.
+Fresh cross-provider review of this exact change remains OPEN. Draft PR only; no merge/deploy.

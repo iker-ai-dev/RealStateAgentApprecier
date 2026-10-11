@@ -21,9 +21,9 @@ class PropertyDataset:
     source: str
 
 
-def load_dataset() -> PropertyDataset:
+def load_dataset(*, require_snowflake: bool = False) -> PropertyDataset:
     """Load Snowflake data when configured, otherwise use bundled sample data."""
-    snowflake_data = _try_load_snowflake()
+    snowflake_data = _try_load_snowflake(require_snowflake=require_snowflake)
     if snowflake_data is not None:
         return snowflake_data
 
@@ -36,11 +36,8 @@ def load_dataset() -> PropertyDataset:
     )
 
 
-def _try_load_snowflake() -> PropertyDataset | None:
+def _try_load_snowflake(*, require_snowflake: bool = False) -> PropertyDataset | None:
     cfg = get_snowflake_config()
-
-    if not cfg:
-        return None
 
     try:
         session = get_snowpark_session(cfg)
@@ -52,10 +49,12 @@ def _try_load_snowflake() -> PropertyDataset | None:
         }
 
         data = {
-            name: _normalize_columns(session.table(table_name).to_pandas())
+            name: _normalize_columns(session.table(table_name).limit(10001).to_pandas())
             for name, table_name in tables.items()
         }
 
+        if any(len(frame) > 10000 for frame in data.values()):
+            raise ValueError("Dataset exceeds bounded demo load.")
         if "lease_end" in data["tenants"].columns:
             data["tenants"]["lease_end"] = pd.to_datetime(data["tenants"]["lease_end"])
         if "sale_date" in data["sales_comps"].columns:
@@ -69,7 +68,12 @@ def _try_load_snowflake() -> PropertyDataset | None:
             source="Snowflake",
         )
     except Exception as exc:
-        _warn(f"Snowflake data could not be loaded; using sample data. Details: {exc}")
+        if require_snowflake:
+            raise RuntimeError(
+                "Snowflake data could not be loaded. Check connection settings, table access, "
+                "and dataset size (maximum 10,000 rows per table). Demo data was not substituted."
+            ) from None
+        _warn("Snowflake data could not be loaded; explicitly using synthetic sample data.")
         return None
 
 
@@ -97,6 +101,8 @@ def get_snowflake_config() -> dict[str, Any]:
         "market_table": os.getenv("SNOWFLAKE_MARKET_TABLE"),
         "sales_comp_table": os.getenv("SNOWFLAKE_SALES_COMP_TABLE"),
         "cortex_model": os.getenv("SNOWFLAKE_CORTEX_MODEL"),
+        "authenticator": os.getenv("SNOWFLAKE_AUTHENTICATOR"),
+        "private_key_file": os.getenv("SNOWFLAKE_PRIVATE_KEY_FILE"),
     }
     env_cfg = {key: value for key, value in env_cfg.items() if value}
 
@@ -114,7 +120,8 @@ def get_snowpark_session(cfg: dict[str, Any] | None = None):
 
         connection_parameters = {
             key: cfg[key]
-            for key in ("account", "user", "password", "role", "warehouse", "database", "schema")
+            for key in ("account", "user", "password", "role", "warehouse", "database", "schema",
+                        "authenticator", "private_key_file")
             if cfg.get(key)
         }
         return Session.builder.configs(connection_parameters).create()
