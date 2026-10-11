@@ -1,1 +1,1 @@
-"""Real estate agent appraiser package."""
+"""RetailScope AI application package."""

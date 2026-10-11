@@ -63,7 +63,7 @@ def set_agent_context(property_id: str, property_name: str, data_source: str) ->
     if sentry_sdk is None or not sentry_sdk.is_initialized():
         return
 
-    sentry_sdk.set_tag("agent.kind", "commercial-real-estate-appraiser")
+    sentry_sdk.set_tag("agent.kind", "retailscope-ai")
     sentry_sdk.set_tag("property.id", property_id)
     sentry_sdk.set_tag("data.source", data_source)
     sentry_sdk.set_context(

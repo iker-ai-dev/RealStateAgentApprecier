@@ -108,7 +108,7 @@ class ValuationResult:
     opportunities: list[str]
 
 
-st.set_page_config(page_title="MLH Real Estate Agent Appraiser", page_icon="MLH", layout="wide")
+st.set_page_config(page_title="RetailScope AI", page_icon="RS", layout="wide")
 
 
 CSS = """
@@ -136,9 +136,9 @@ def main() -> None:
     header, selector = st.columns([0.72, 0.28], vertical_alignment="center")
     with header:
         st.markdown('<span class="badge">Snowflake Deployment</span>', unsafe_allow_html=True)
-        st.title("Real Estate Agent Appraiser")
+        st.title("RetailScope AI")
         st.markdown(
-            '<div class="subtitle">Ask acquisition questions and inspect valuation context for open-air shopping centers.</div>',
+            '<div class="subtitle">AI-powered shopping-center underwriting for rents, trade areas, comps, and acquisition value.</div>',
             unsafe_allow_html=True,
         )
     with selector:
@@ -229,7 +229,7 @@ def render_chat(property_row, tenants, market, comps, valuation) -> None:
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
 
-    prompt = st.chat_input("Ask the appraiser agent")
+    prompt = st.chat_input("Ask RetailScope AI")
     if prompt:
         submit_question(prompt, property_row, tenants, market, comps, valuation)
         st.rerun()

@@ -1,6 +1,6 @@
-# MLH Real Estate Agent Appraiser
+# RetailScope AI
 
-A Streamlit app for exploring acquisition value on open-air commercial shopping centers. It pairs a chat UI with a right-side preview panel that updates with the current property's rent roll, market context, valuation model, and acquisition read.
+RetailScope AI is a Streamlit app for exploring acquisition value on open-air commercial shopping centers. It pairs a chat UI with a right-side preview panel that updates with the current property's rent roll, market context, valuation model, and acquisition read.
 
 The app runs locally with bundled sample data and can be pointed at Snowflake tables plus Snowflake Cortex when credentials are available.
 

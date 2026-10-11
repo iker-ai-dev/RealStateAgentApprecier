@@ -11,8 +11,8 @@ from app.services.valuation import ValuationResult, build_valuation
 
 
 st.set_page_config(
-    page_title="MLH Real Estate Agent Appraiser",
-    page_icon="MLH",
+    page_title="RetailScope AI",
+    page_icon="RS",
     layout="wide",
     initial_sidebar_state="collapsed",
 )
@@ -99,10 +99,10 @@ def main() -> None:
             """
             <div class="app-title">
               <span class="badge">Acquisition Desk</span>
-              <h1>Real Estate Agent Appraiser</h1>
+              <h1>RetailScope AI</h1>
             </div>
             <div class="subtitle">
-              Query rent rolls, demographics, comparable sales, and valuation assumptions for open-air shopping centers.
+              AI-powered shopping-center underwriting for rents, trade areas, comps, and acquisition value.
             </div>
             """,
             unsafe_allow_html=True,
@@ -177,7 +177,7 @@ def _render_chat(
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
 
-    user_prompt = st.chat_input("Ask the appraiser agent")
+    user_prompt = st.chat_input("Ask RetailScope AI")
     if user_prompt:
         _submit_question(user_prompt, property_row, tenants, market, comps, valuation)
         st.rerun()

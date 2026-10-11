@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: mlh-real-estate-agent-appraiser
+    name: retailscope-ai
     env: docker
     plan: starter
     autoDeploy: true

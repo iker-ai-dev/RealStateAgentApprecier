@@ -18,7 +18,7 @@ If data is missing, say what diligence is still required.
 """
 
 
-@ai_track("CRE appraisal answer")
+@ai_track("RetailScope AI answer")
 def answer_agent(
     question: str,
     property_row: pd.Series,
@@ -33,7 +33,7 @@ def answer_agent(
         "tenant_count": int(len(tenants)),
         "comp_count": int(len(comps)),
     }
-    with start_agent_transaction("real_estate_appraiser.answer", transaction_data):
+    with start_agent_transaction("retailscope_ai.answer", transaction_data):
         with start_span("ai.prompt.build", "Build appraisal prompt"):
             prompt = _build_prompt(question, property_row, tenants, market, comps, valuation)
 
