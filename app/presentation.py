@@ -1,5 +1,4 @@
 """Shared presentation only. No research, model calls or credential access."""
-from html import escape
 import streamlit as st
 
 CSS = """
@@ -65,9 +64,7 @@ def navigation():
 
 
 def render_analysis_mode(source):
-    demo = "demo" in source.lower() or "sample" in source.lower()
-    label = "DEMO MODEL" if demo else "UNVERIFIED DATA"
-    st.markdown('<div class="rs-mode"><b>' + label + '</b> · ' + escape(source) + ' · Legacy estimates are illustrative. No investment decision or evaluated return target.</div>', unsafe_allow_html=True)
+    st.caption("Data source: " + str(source))
 
 
 def render_analysis_header():

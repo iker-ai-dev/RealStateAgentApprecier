@@ -120,14 +120,14 @@ class PolicyTests(unittest.TestCase):
         with patch.dict(sys.modules, {'_snowflake': missing}), patch.dict(os.environ, {'NIMBLE_API_KEY': 'LOCAL_PRIVATE'}):
             self.assertEqual(research_ui._nimble_key(), '')
 
-    def test_both_streamlit_entrypoints_show_gates_without_network(self):
+    def test_both_streamlit_entrypoints_keep_sources_and_diligence_without_network(self):
         for entry in ('streamlit_app.py', 'snowflake_streamlit_app.py'):
             app = AppTest.from_file(str(ROOT/entry), default_timeout=20)
             app.secrets = {}
             app.run()
             app.radio[0].set_value('Center analysis').run()
             self.assertEqual(len(app.exception), 0, (entry, list(app.exception)))
-            self.assertTrue(any('Legacy estimates are illustrative' in str(x.value) for x in app.markdown), entry)
+            self.assertTrue(any('Data source:' in str(x.value) for x in app.caption), entry)
             self.assertTrue(any('Needs diligence' in str(x.value) for x in app.info), entry)
             self.assertTrue(any('Illustrative Value' == x.label for x in app.metric), entry)
 

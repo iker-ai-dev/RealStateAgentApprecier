@@ -290,7 +290,6 @@ def render_discovery_status():
 def render_deal_radar(leads=None):
     """Return selected lead or None; render locally without any live research."""
     st.markdown('<div class="rs-hero"><div><div class="rs-eyebrow">ACQUISITION WORKSPACE</div><h1>Public deal radar</h1><p>Review partially vacant retail centers from saved public-source evidence.</p></div><div class="rs-mandate"><strong>$1–10m</strong><span>U.S. open-air centers · 10–60% vacancy</span><span>20%+ IRR / 6–7× equity goals · not evaluated</span></div></div>',unsafe_allow_html=True)
-    st.markdown('<div class="rs-mode"><b>DISCOVERY ONLY</b> · Public listing assertions are unverified. Missing facts stay unknown. No investment decision or return-target fit.</div>',unsafe_allow_html=True)
     st.markdown('<div class="rs-pipeline"><span><b>01</b> Background agents</span><span><b>02</b> Review leads &amp; evidence</span><span><b>03</b> Financial analysis · needs documents</span></div>',unsafe_allow_html=True)
     # Root-owned explicit-search control. Importing/rendering does not spend credits.
     try:

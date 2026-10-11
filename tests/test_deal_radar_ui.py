@@ -124,7 +124,8 @@ class RealUI(unittest.TestCase):
     self.assertEqual(len(app.exception),0)
     self.assertEqual(len(app.chat_input),1)
     self.assertEqual([x.label for x in app.tabs],['Model','Rent Roll','Market','Comps'])
-    self.assertTrue(any('DEMO MODEL' in x.value for x in app.markdown))
+    self.assertTrue(any('Data source:' in x.value for x in app.caption))
+    self.assertFalse(any('DEMO MODEL' in x.value for x in app.markdown))
     self.assertEqual(len([x for x in app.metric if x.label in ['Illustrative Value','Illustrative NOI','Heuristic Rent','Value / SF']]),4)
     self.assertTrue(any(x.label=='Evidence gaps and model diagnostics' for x in app.expander))
 
