@@ -28,6 +28,20 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Build workspace frontend
+        working-directory: web
+        run: |
+          npm ci
+          npm run build
+          npm test
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
@@ -60,6 +74,27 @@ jobs:
       - name: Run offline integration tests
         run: python -m unittest discover -s tests -v
 
+      - name: Build and smoke test live container
+        run: |
+          docker build --tag retailscope:ci .
+          docker run --detach --name retailscope-ci --publish 18080:10000 \
+            --env RETAILSCOPE_APP_MODE=live --env RETAILSCOPE_STORAGE=sqlite \
+            --env RETAILSCOPE_SESSION_SIGNING_KEY=ci-only-signing-key-never-use-in-production \
+            --env GITHUB_SHA="$GITHUB_SHA" retailscope:ci
+          trap 'docker logs retailscope-ci; docker rm --force retailscope-ci' EXIT
+          curl --fail --retry 30 --retry-connrefused --retry-delay 2 http://127.0.0.1:18080/healthz
+          python - <<'PY'
+          import json, os, urllib.request
+          base = "http://127.0.0.1:18080"
+          with urllib.request.urlopen(base + "/healthz") as response:
+              assert json.load(response)["release"] == os.environ["GITHUB_SHA"]
+          with urllib.request.urlopen(base + "/api/leads") as response:
+              assert json.load(response) == {"leads": []}, "live mode must not seed sample leads"
+          with urllib.request.urlopen(base + "/") as response:
+              assert b"RetailScope" in response.read()
+          print("Live container smoke passed.")
+          PY
+
   deploy-render:
     name: Deploy public app and MCP to Render
     runs-on: ubuntu-latest
@@ -85,6 +120,24 @@ jobs:
             200|202) echo "Render accepted deploy of tested commit ${GITHUB_SHA}." ;;
             *) echo "::error::Render rejected deployment (HTTP ${status})."; exit 1 ;;
           esac
+
+      - name: Verify running release
+        env:
+          APP_URL: https://retailscope-ai-demo.onrender.com
+        run: |
+          for attempt in $(seq 1 60); do
+            payload=$(curl --silent --show-error --connect-timeout 5 --max-time 15 "$APP_URL/healthz" || true)
+            actual=$(printf '%s' "$payload" | python -c 'import json,sys
+          try: print(json.load(sys.stdin).get("release", ""))
+          except (ValueError, AttributeError): print("")')
+            if [ "$actual" = "$GITHUB_SHA" ]; then
+              echo "Verified running RetailScope release $GITHUB_SHA."
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "::error::The deployed app did not report the tested release within the rollout window."
+          exit 1
 
   deploy:
     name: Deploy to Snowflake
