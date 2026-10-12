@@ -347,6 +347,14 @@ class LiveAgentTests(unittest.TestCase):
         with self.assertRaisesRegex(agent.LiveAgentError, 'Numeric model claims'):
             self.run_analysis(leads=leads)
 
+    def test_generation_schema_offers_only_literal_source_excerpts(self):
+        prepared = agent._prepare_evidence({'message': 'Analyze', 'leads': LEADS})
+        quote = prepared['response_format']['schema']['properties']['paragraphs']['items']['properties']['quotes']['items']
+        self.assertEqual(quote['properties']['source_id']['enum'], ['lead-a'])
+        excerpts = quote['properties']['quote']['enum']
+        self.assertTrue(excerpts)
+        self.assertTrue(all(excerpt in LEADS[0]['summary'] for excerpt in excerpts))
+
     def test_numbered_diligence_actions_and_code_computed_cap_spread_are_not_false_failures(self):
         from app.underwriting import Scenario, calculate_scenario
         scenario = calculate_scenario(Scenario(purchase_price=2_000_000, annual_noi=200_000, exit_cap_rate=0.08))

@@ -171,10 +171,22 @@ def _source_url(value: Any) -> str:
     return value
 
 
-def _response_format(*, has_summaries: bool = True, has_scenario: bool = False) -> dict[str, Any]:
+def _response_format(*, has_summaries: bool = True, has_scenario: bool = False,
+                     evidence: list[dict] | None = None) -> dict[str, Any]:
     quote = {"type": "object", "properties": {
         "source_id": {"type": "string"}, "quote": {"type": "string"}},
         "required": ["source_id", "quote"], "additionalProperties": False}
+    source_ids = [item['id'] for item in evidence or []]
+    # Constrain quotation generation to actual source text. A model should select
+    # evidence, not retype it from memory and silently repair truncated words.
+    excerpts = list(dict.fromkeys(line.strip()[:1200]
+                                 for item in evidence or []
+                                 for line in item['summary'].splitlines()[:30]
+                                 if len(line.strip()) >= 8))
+    if source_ids:
+        quote['properties']['source_id']['enum'] = source_ids
+    if excerpts:
+        quote['properties']['quote']['enum'] = excerpts
     paragraph = {"type": "object", "properties": {
         "kind": {"type": "string", "enum": (["analysis"] if has_summaries or has_scenario else [])
                  + ["recommendation", "unknown"]},
@@ -323,7 +335,7 @@ def _prepare_evidence(state: State) -> dict[str, Any]:
     return {"evidence": evidence, "prompt": INSTRUCTIONS + "\nINPUT_DATA=" + data,
             "scenario": scenario, "scenario_metrics": metrics,
             "response_format": _response_format(has_summaries=any(x['summary'].strip() for x in evidence),
-                                                has_scenario=scenario is not None)}
+                                                has_scenario=scenario is not None, evidence=evidence)}
 
 
 def _validate_citations(state: State) -> dict[str, Any]:
@@ -332,7 +344,11 @@ def _validate_citations(state: State) -> dict[str, Any]:
         raise LiveAgentError("Invalid analysis completion.")
     try:
         from jsonschema import validate
-        validate(completion.analysis, state["response_format"]["schema"])
+        # Generation offers exact excerpts; validation still accepts any exact
+        # substring, including responses from alternate provider adapters.
+        validate(completion.analysis, _response_format(
+            has_summaries=any(item['summary'].strip() for item in state['evidence']),
+            has_scenario=state.get('scenario') is not None)['schema'])
     except Exception:
         raise LiveAgentError("Model analysis did not match the required response schema.") from None
     paragraphs = completion.analysis["paragraphs"]
