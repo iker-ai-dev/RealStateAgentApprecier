@@ -46,6 +46,11 @@ LangGraph orchestrates analysis; Snowflake Cortex bills model inference to the
 connected Snowflake account. Storage and SQL warehouse compute are separate
 Snowflake consumption. Nimble bills discovery separately. Model responses report
 actual returned token counts, not invented dollar estimates.
+Answer traces also retain numeric Cortex token counters and completed-response
+counts. Repair calls are aggregated; a counter missing from any response is left
+unknown, not filled with zero. These are usage diagnostics, not a billing ledger:
+failed provider calls may still incur charges. Live Render releases use the
+`render-live` Sentry environment, separate from `render-demo`.
 
 Requests are bounded by concurrency and owner/IP allowances, plus an atomic,
 durable daily run cap (`RETAILSCOPE_DAILY_CALL_LIMIT`, default 120). The global cap

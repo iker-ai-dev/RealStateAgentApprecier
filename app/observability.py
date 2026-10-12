@@ -67,6 +67,7 @@ WORKFLOW_MESSAGES = {
 }
 STATUSES = frozenset(("ok", "internal_error", "cancelled", "unknown_error",
                       "deadline_exceeded", "unavailable", "resource_exhausted"))
+USAGE_KEYS = ("prompt_tokens", "completion_tokens", "total_tokens", "guardrail_tokens")
 _UNSET = object()
 _client = None
 _environment = ENVIRONMENT
@@ -174,7 +175,7 @@ def _runtime_labels(runtime: str) -> tuple[str, str]:
         environment = "snowflake"
     elif runtime == "render" or os.getenv("RENDER") == "true" or (
             runtime == "container" and os.getenv("RETAILSCOPE_PUBLIC_DEMO") == "true"):
-        environment = "render-demo"
+        environment = "render-live" if os.getenv("RETAILSCOPE_APP_MODE") == "live" else "render-demo"
     release = RELEASE
     for key in ("RENDER_GIT_COMMIT", "GITHUB_SHA"):
         sha = os.getenv(key)
@@ -196,6 +197,15 @@ def _scrub_transaction(event: dict[str, Any], hint: dict[str, Any]) -> dict[str,
     safe.update(type="transaction", transaction=name, transaction_info={"source": "custom"},
                 contexts={"trace": _trace(raw_trace if isinstance(raw_trace, dict) else {},
                                            TRANSACTIONS[name])}, spans=[])
+    if name == "retailscope_ai.answer" and isinstance(raw_trace, dict):
+        raw_data = raw_trace.get("data")
+        if isinstance(raw_data, dict):
+            counters = {key: raw_data[key] for key in
+                        ("retailscope.cortex.calls", *(f"retailscope.cortex.{k}" for k in USAGE_KEYS))
+                        if type(raw_data.get(key)) is int and 0 <= raw_data[key] <= 1_000_000_000}
+            if counters:
+                counters["retailscope.billing_provider"] = "Snowflake Cortex"
+                safe["contexts"]["trace"]["data"] = counters
     spans = event.get("spans")
     for raw in spans if isinstance(spans, list) else []:
         if not isinstance(raw, dict):
@@ -351,6 +361,30 @@ def ai_track(name: str) -> Callable:
     def decorator(func: Callable) -> Callable:
         return func
     return decorator
+
+
+def record_cortex_usage(usage: dict[str, Any]) -> None:
+    """Aggregate provider-reported counters, never estimated cost or AI content."""
+    if not _enabled() or not isinstance(usage, dict):
+        return
+    try:
+        current = sentry_sdk.get_current_scope().span
+        transaction = current.containing_transaction if current is not None else None
+        if transaction is None or transaction.name != "retailscope_ai.answer":
+            return
+        data = transaction.get_trace_context().get("data", {})
+        calls = data.get("retailscope.cortex.calls", 0)
+        transaction.set_data("retailscope.cortex.calls", calls + 1)
+        for key in USAGE_KEYS:
+            attribute = f"retailscope.cortex.{key}"
+            value = usage.get(key)
+            # A missing counter in any call makes the aggregate unknown.
+            previous = data.get(attribute, 0 if calls == 0 else None)
+            total = (previous + value if type(previous) is int and type(value) is int
+                     and 0 <= value <= 1_000_000_000 else None)
+            transaction.set_data(attribute, total)
+    except Exception:
+        pass  # Optional telemetry must never change inference behavior.
 
 
 @contextmanager

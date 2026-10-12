@@ -119,6 +119,41 @@ class PrivacyTests(unittest.TestCase):
         self.assertEqual(payload['exception']['values'], [{'type': 'OperationError', 'value': obs.ERROR_MESSAGE}])
         self.assert_safe()
 
+    def test_cortex_usage_is_numeric_aggregated_and_privacy_scrubbed(self):
+        self.contaminate()
+        with obs.start_agent_transaction('retailscope_ai.answer'):
+            obs.record_cortex_usage({'prompt_tokens': 100, 'completion_tokens': 20,
+                                     'total_tokens': 120, 'guardrail_tokens': 1,
+                                     'prompt': CANARY})
+            obs.record_cortex_usage({'prompt_tokens': 50, 'completion_tokens': 10,
+                                     'total_tokens': 60, 'response': CANARY})
+        data = self.payloads()[0]['contexts']['trace']['data']
+        self.assertEqual(data, {'retailscope.cortex.calls': 2,
+                               'retailscope.cortex.prompt_tokens': 150,
+                               'retailscope.cortex.completion_tokens': 30,
+                               'retailscope.cortex.total_tokens': 180,
+                               'retailscope.billing_provider': 'Snowflake Cortex'})
+        self.assert_safe()
+
+    def test_usage_missing_or_invalid_in_any_call_stays_unknown(self):
+        with obs.start_agent_transaction('retailscope_ai.answer'):
+            obs.record_cortex_usage({'prompt_tokens': True, 'completion_tokens': -1})
+            obs.record_cortex_usage({'prompt_tokens': 50, 'completion_tokens': 10,
+                                     'total_tokens': 60})
+        data = self.payloads()[0]['contexts']['trace']['data']
+        self.assertEqual(data, {'retailscope.cortex.calls': 2,
+                               'retailscope.billing_provider': 'Snowflake Cortex'})
+        self.assert_safe()
+
+    def test_cortex_usage_does_not_attach_to_other_workflows(self):
+        with obs.start_agent_transaction('retailscope_ai.research'):
+            obs.record_cortex_usage({'total_tokens': 100})
+        self.assertNotIn('data', self.payloads()[0]['contexts']['trace'])
+
+    def test_live_render_has_separate_environment(self):
+        with patch.dict(os.environ, {'RENDER': 'true', 'RETAILSCOPE_APP_MODE': 'live'}):
+            self.assertEqual(obs._runtime_labels('container')[0], 'render-live')
+
     def test_unapproved_raw_events_unknown_transactions_and_dynamic_spans_are_dropped(self):
         self.assertIsNone(sentry_sdk.capture_exception(ValueError(CANARY)))
         self.assertIsNone(sentry_sdk.capture_message(CANARY))

@@ -21,7 +21,7 @@ from typing import Any, Protocol, TypedDict
 from urllib.parse import urlsplit
 
 from app.data_access import get_snowflake_config, get_snowpark_session
-from app.observability import start_agent_transaction, start_span
+from app.observability import record_cortex_usage, start_agent_transaction, start_span
 
 MAX_LEADS = 20
 MAX_RESPONSE_BYTES = 64_000
@@ -112,7 +112,9 @@ class CortexProvider:
             model = value.get("model", self.model)
             if type(model) is not str or not MODEL_ID.fullmatch(model):
                 raise ValueError()
-            return Completion(analysis, _usage(value.get("usage")), model)
+            usage = _usage(value.get("usage"))
+            record_cortex_usage(usage)
+            return Completion(analysis, usage, model)
         except Exception:
             raise LiveAgentError("Cortex analysis failed or returned an invalid response; no fallback was used.") from None
         finally:
