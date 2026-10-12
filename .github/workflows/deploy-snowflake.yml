@@ -82,7 +82,7 @@ jobs:
             --env RETAILSCOPE_SESSION_SIGNING_KEY=ci-only-signing-key-never-use-in-production \
             --env GITHUB_SHA="$GITHUB_SHA" retailscope:ci
           trap 'docker logs retailscope-ci; docker rm --force retailscope-ci' EXIT
-          curl --fail --retry 30 --retry-connrefused --retry-delay 2 http://127.0.0.1:18080/healthz
+          curl --fail --retry 30 --retry-all-errors --retry-delay 2 --max-time 10 http://127.0.0.1:18080/healthz
           python - <<'PY'
           import json, os, urllib.request
           base = "http://127.0.0.1:18080"
