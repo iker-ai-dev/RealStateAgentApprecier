@@ -96,7 +96,7 @@ async function request<S extends z.ZodTypeAny>(
   signal?: AbortSignal,
   body?: unknown,
 ): Promise<z.output<S>> {
-  const timeout = AbortSignal.timeout(30_000);
+  const timeout = AbortSignal.timeout(path === "/chat" ? 240_000 : 30_000);
   const response = await fetch(`/api${path}`, {
     method: body === undefined ? "GET" : "POST",
     headers:
@@ -176,6 +176,11 @@ export const api = {
           z.object({
             role: z.enum(["user", "assistant"]),
             content: z.string(),
+            sources: z
+              .array(z.object({ title: z.string(), url: z.string() }))
+              .nullish(),
+            model: z.string().nullish(),
+            usage: z.unknown().optional(),
           }),
         ),
       }),

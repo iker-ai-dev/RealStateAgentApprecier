@@ -2,14 +2,16 @@
 
 Owners are opaque session IDs supplied by the server, never client-selected identity.
 Snowflake deployments must provision ``SNOWFLAKE_SCHEMA_SQL`` in the session's
-database/schema. Construction does not connect, create tables, or alter Snowflake.
+database/schema, then run ``SNOWFLAKE_QUOTA_SQL`` once in a serialized admin
+migration before enabling paid work. Construction does not connect, create tables,
+or alter Snowflake.
 Standard Snowflake table keys are informational; use a single writer per owner
 when concurrently inserting the same lead ID.
 """
 from __future__ import annotations
 
 from contextlib import AbstractContextManager, closing, contextmanager
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 import hashlib
 import json
 import os
@@ -27,6 +29,7 @@ MAX_TEXT_BYTES = 65_536
 MAX_CONVERSATIONS = 100
 MAX_CONVERSATION_PREVIEW = 100
 JOB_PATCH_FIELDS = ("status", "leads", "error", "analysis")
+MESSAGE_METADATA_FIELDS = ("sources", "model", "usage")
 
 SNOWFLAKE_SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS RETAILSCOPE_WORKSPACE_RECORDS (
@@ -38,6 +41,29 @@ CREATE TABLE IF NOT EXISTS RETAILSCOPE_WORKSPACE_RECORDS (
     PRIMARY KEY (record_type, owner, id)
 )
 """
+
+# Admin migration only: run once, without concurrent seeders. Reservations never insert.
+SNOWFLAKE_QUOTA_SQL = """
+INSERT INTO RETAILSCOPE_WORKSPACE_RECORDS (record_type, owner, id, payload, updated_at)
+SELECT 'quota', 'system', 'daily',
+    OBJECT_CONSTRUCT('date', TO_CHAR(CONVERT_TIMEZONE('UTC', CURRENT_TIMESTAMP())::DATE,
+                                    'YYYY-MM-DD'), 'count', 0),
+    CURRENT_TIMESTAMP()
+WHERE NOT EXISTS (
+    SELECT 1 FROM RETAILSCOPE_WORKSPACE_RECORDS
+    WHERE record_type='quota' AND owner='system' AND id='daily'
+)
+"""
+
+
+def _utc_day() -> str:
+    return datetime.now(timezone.utc).date().isoformat()
+
+
+def _daily_limit(limit: int) -> int:
+    if type(limit) is not int or not 0 <= limit <= 9_223_372_036_854_775_807:
+        raise ValueError("Daily usage limit must be a nonnegative signed 64-bit integer.")
+    return limit
 
 
 def _identifier(value: str, name: str) -> str:
@@ -194,19 +220,26 @@ class _StoreInterface:
                             error="Interrupted by server restart; submit a new job to retry.")
         return len(records)
 
-    def append_message(self, owner: str, conversation_id: str, role: str, content: str) -> None:
+    def append_message(self, owner: str, conversation_id: str, role: str, content: str, *,
+                       metadata: dict | None = None) -> None:
         owner = _identifier(owner, "Owner")
         conversation_id = _identifier(conversation_id, "Conversation ID")
         if role not in ("system", "user", "assistant", "tool"):
             raise ValueError("Unsupported message role.")
         payload = {"conversation_id": conversation_id, "role": role,
                    "content": _text(content, "Message content")}
+        if metadata is not None:
+            if not isinstance(metadata, dict) or any(key not in MESSAGE_METADATA_FIELDS for key in metadata):
+                raise ValueError("Message metadata may contain only sources, model, and usage.")
+            payload.update(metadata)
         self._write("message", owner, [(uuid4().hex, _encode(payload))])
 
     def messages(self, owner: str, conversation_id: str) -> list[dict]:
         records = self._read("message", _identifier(owner, "Owner"),
                              conversation_id=_identifier(conversation_id, "Conversation ID"))
-        return [{"role": item["role"], "content": item["content"]} for item in records]
+        return [{"role": item["role"], "content": item["content"],
+                 **{key: item[key] for key in MESSAGE_METADATA_FIELDS if key in item}}
+                for item in records]
 
 
 class WorkspaceStore(_StoreInterface):
@@ -238,9 +271,53 @@ class WorkspaceStore(_StoreInterface):
                 CREATE INDEX IF NOT EXISTS messages_owner_conversation
                     ON messages(owner, conversation_id, sequence);
             """)
+            # Seed only when creating the quota table; a missing existing row stays closed.
+            connection.execute("BEGIN IMMEDIATE")
+            exists = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='daily_usage'"
+            ).fetchone()
+            if exists is None:
+                connection.execute("""
+                    CREATE TABLE daily_usage (
+                        id TEXT PRIMARY KEY CHECK(id='daily'), date TEXT NOT NULL,
+                        count INTEGER NOT NULL CHECK(typeof(count)='integer' AND count>=0)
+                    )
+                """)
+                connection.execute("INSERT INTO daily_usage(id, date, count) VALUES (?, ?, ?)",
+                                   ("daily", _utc_day(), 0))
 
     def _connect(self):
         return sqlite3.connect(str(self.path), timeout=30)
+
+    def reserve_daily_usage(self, limit: int) -> bool:
+        """Reserve one paid run globally for this UTC day; never refund failures.
+
+        Missing, duplicate, invalid or future-dated counters deny the reservation.
+        Database errors propagate, so callers must not start paid work on exceptions.
+        """
+        limit = _daily_limit(limit)
+        if limit == 0:
+            return False
+        with closing(self._connect()) as connection, connection:
+            connection.execute("BEGIN IMMEDIATE")
+            today = _utc_day()
+            rows = connection.execute("SELECT date, count FROM daily_usage WHERE id=? LIMIT 2",
+                                      ("daily",)).fetchall()
+            if len(rows) != 1:
+                return False
+            stored_day, count = rows[0]
+            try:
+                valid_day = isinstance(stored_day, str) and date.fromisoformat(stored_day).isoformat() == stored_day
+            except ValueError:
+                valid_day = False
+            if not valid_day or stored_day > today or type(count) is not int or count < 0:
+                return False
+            if stored_day == today and count >= limit:
+                return False
+            next_count = count + 1 if stored_day == today else 1
+            result = connection.execute("UPDATE daily_usage SET date=?, count=? WHERE id=?",
+                                        (today, next_count, "daily"))
+            return result.rowcount == 1
 
     def _write(self, kind: str, owner: str, records: list[tuple[str, str]]) -> None:
         with closing(self._connect()) as connection, connection:
@@ -361,6 +438,40 @@ class SnowflakeWorkspaceStore(_StoreInterface):
                 yield resource
         else:
             yield resource
+
+    def reserve_daily_usage(self, limit: int) -> bool:
+        """Reserve one paid run via a single update of the admin-seeded singleton.
+
+        No SELECT-then-write or insertion race. Missing/duplicate/invalid counters
+        deny reservations; provider errors propagate without retries or refunds.
+        Requires autocommit (not a caller-owned uncommitted transaction).
+        """
+        limit = _daily_limit(limit)
+        if limit == 0:
+            return False
+        today = _utc_day()
+        with self._session() as session:
+            result = session.sql("""
+                UPDATE RETAILSCOPE_WORKSPACE_RECORDS
+                SET payload=OBJECT_CONSTRUCT('date', ?, 'count',
+                        IFF(payload:date::STRING=?,
+                            TRY_TO_NUMBER(payload:count::STRING, 38, 0)+1, 1)),
+                    updated_at=CURRENT_TIMESTAMP()
+                WHERE record_type='quota' AND owner='system' AND id='daily'
+                    AND (SELECT COUNT(*) FROM RETAILSCOPE_WORKSPACE_RECORDS
+                         WHERE record_type='quota' AND owner='system' AND id='daily')=1
+                    AND IS_OBJECT(payload) AND IS_INTEGER(payload:count)
+                    AND TRY_TO_NUMBER(payload:count::STRING, 38, 0)>=0
+                    AND TRY_TO_NUMBER(payload:count::STRING, 38, 0)<=9223372036854775807
+                    AND IS_VARCHAR(payload:date)
+                    AND TO_CHAR(TRY_TO_DATE(payload:date::STRING, 'YYYY-MM-DD'),
+                                'YYYY-MM-DD')=payload:date::STRING
+                    AND (payload:date::STRING<? OR
+                         (payload:date::STRING=? AND TRY_TO_NUMBER(payload:count::STRING, 38, 0)<?))
+            """, params=[today, today, today, today, limit]).collect(
+                statement_params={"STATEMENT_TIMEOUT_IN_SECONDS": "30"}, log_on_exception=False,
+            )
+        return len(result) == 1 and type(result[0][0]) is int and result[0][0] == 1
 
     def _write(self, kind: str, owner: str, records: list[tuple[str, str]]) -> None:
         if not records:

@@ -7,18 +7,44 @@ afterEach(() => {
 });
 
 describe("API contract", () => {
-  it("sends only supplied chat context", async () => {
-    const fetch = vi
-      .fn()
-      .mockResolvedValue(
+  it("preserves optional restored-message metadata and accepts older messages", async () => {
+    const metadata = {
+      sources: [{ title: "Evidence", url: "https://example.org" }],
+      model: "Cortex",
+      usage: { tokens: 25 },
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
         new Response(
           JSON.stringify({
-            answer: "Answer",
-            sources: [],
-            conversation_id: "c1",
+            id: "saved1",
+            messages: [
+              { role: "user", content: "Question" },
+              { role: "assistant", content: "Answer", ...metadata },
+            ],
           }),
         ),
-      );
+      ),
+    );
+    const thread = await api.conversation("saved1");
+    expect(thread.messages[0]).toEqual({ role: "user", content: "Question" });
+    expect(thread.messages[1]).toEqual({
+      role: "assistant",
+      content: "Answer",
+      ...metadata,
+    });
+  });
+  it("sends only supplied chat context", async () => {
+    const fetch = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          answer: "Answer",
+          sources: [],
+          conversation_id: "c1",
+        }),
+      ),
+    );
     vi.stubGlobal("fetch", fetch);
     await api.chat({
       message: "Question",

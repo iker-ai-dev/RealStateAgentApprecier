@@ -10,7 +10,7 @@ npm ci
 npm run dev
 ```
 
-Open `/landing` for the workspace and `/landing/mcp` for MCP connections. `/` also opens the workspace. The Vite development proxy forwards `/api` and `/mcp` to `http://127.0.0.1:8765`, preserving Host for the backend's same-origin check; it does not provide or modify a backend. Missing API routes show loading/error/empty states, never substitute data. Production hosting must serve the built `dist/` with SPA history fallback and same-origin API/MCP routing.
+Open `/` for the workspace and `/landing` for MCP connections (`/landing/mcp` remains an alias). The Vite development proxy forwards `/api` and `/mcp` to `http://127.0.0.1:8765`, preserving Host for the backend's same-origin check; it does not provide or modify a backend. Missing API routes show loading/error/empty states, never substitute data. Production hosting must serve the built `dist/` with SPA history fallback and same-origin API/MCP routing.
 
 ```sh
 npm test

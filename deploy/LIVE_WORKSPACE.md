@@ -28,8 +28,9 @@ Required server-side provider configuration:
   excluded from Sentry payloads.
 
 Only the API process receives provider secrets. The browser bundle does not.
-Apply `SNOWFLAKE_SCHEMA_SQL` from `app.workspace_store` once using the deployment
-role before starting the service. Startup probes the workspace table.
+Apply `SNOWFLAKE_SCHEMA_SQL` and then `SNOWFLAKE_QUOTA_SQL` from
+`app.workspace_store` once using the deployment role before starting the service.
+Run these migrations serially, not concurrently. Startup probes the workspace table.
 
 For local work, `SNOWFLAKE_CONNECTION_NAME=retailscope` explicitly selects the
 existing connection in `~/.snowflake/config.toml`; no connection is read implicitly.
@@ -46,9 +47,10 @@ connected Snowflake account. Storage and SQL warehouse compute are separate
 Snowflake consumption. Nimble bills discovery separately. Model responses report
 actual returned token counts, not invented dollar estimates.
 
-Requests are bounded by concurrency and owner/IP allowances, plus a process-wide
-daily call cap (`RETAILSCOPE_DAILY_CALL_LIMIT`, default 120). These in-process
-allowances reset on restart and are not a substitute for provider/account quotas.
+Requests are bounded by concurrency and owner/IP allowances, plus an atomic,
+durable daily run cap (`RETAILSCOPE_DAILY_CALL_LIMIT`, default 120). The global cap
+survives process restarts; owner/IP short-window allowances are in-process.
+The run cap is not a dollar budget or a substitute for provider/account quotas.
 Each research run uses at most three Nimble searches; analysis has bounded token
 output and repair attempts. No autonomous purchase or financial transaction is
 performed.

@@ -1,7 +1,8 @@
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing, contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
+import multiprocessing
 import os
 from pathlib import Path
 import sqlite3
@@ -10,6 +11,12 @@ import unittest
 from unittest.mock import MagicMock, Mock, patch
 
 from app import workspace_store as storage
+
+
+def _reserve_in_process(args):
+    path, limit, attempts = args
+    store = storage.WorkspaceStore(path)
+    return sum(store.reserve_daily_usage(limit) for _ in range(attempts))
 
 
 class SQLiteWorkspaceTests(unittest.TestCase):
@@ -24,6 +31,71 @@ class SQLiteWorkspaceTests(unittest.TestCase):
         self.assertEqual(self.store.list_conversations("owner-a"), [])
         self.assertEqual(self.store.messages("owner-a", "conversation"), [])
         self.assertIsNone(self.store.get_job("owner-a", "missing"))
+
+    def test_daily_usage_is_durable_and_never_refunded_for_failed_jobs(self):
+        self.assertTrue(self.store.reserve_daily_usage(2))
+        job = self.store.create_job("owner", "paid run")
+        self.store.update_job("owner", job["id"], "failed", error="Provider failed")
+        reopened = storage.WorkspaceStore(self.path)
+        self.assertTrue(reopened.reserve_daily_usage(2))
+        self.assertFalse(storage.WorkspaceStore(self.path).reserve_daily_usage(2))
+        with closing(sqlite3.connect(self.path)) as connection:
+            self.assertEqual(connection.execute("SELECT count FROM daily_usage WHERE id=?", ("daily",)).fetchone()[0], 2)
+
+    def test_daily_usage_rolls_over_only_to_a_later_utc_day(self):
+        today = storage._utc_day()
+        tomorrow = (datetime.fromisoformat(today) + timedelta(days=1)).date().isoformat()
+        self.assertTrue(self.store.reserve_daily_usage(1))
+        self.assertFalse(self.store.reserve_daily_usage(1))
+        with patch.object(storage, "_utc_day", return_value=tomorrow):
+            self.assertTrue(self.store.reserve_daily_usage(1))
+            self.assertFalse(storage.WorkspaceStore(self.path).reserve_daily_usage(1))
+        # A delayed old-day caller cannot reset the new-day budget.
+        self.assertFalse(self.store.reserve_daily_usage(1))
+
+    def test_daily_usage_is_atomic_across_threads_and_store_instances(self):
+        stores = [self.store, storage.WorkspaceStore(self.path)]
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            results = list(executor.map(lambda index: stores[index % 2].reserve_daily_usage(7), range(30)))
+        self.assertEqual(sum(results), 7)
+        self.assertFalse(self.store.reserve_daily_usage(7))
+
+    def test_daily_usage_is_atomic_across_processes(self):
+        with multiprocessing.get_context("spawn").Pool(4) as pool:
+            results = pool.map(_reserve_in_process, [(str(self.path), 11, 10)] * 4)
+        self.assertEqual(sum(results), 11)
+        self.assertFalse(storage.WorkspaceStore(self.path).reserve_daily_usage(11))
+
+    def test_daily_usage_missing_counter_is_not_reseeded_on_restart(self):
+        with closing(sqlite3.connect(self.path)) as connection, connection:
+            connection.execute("DELETE FROM daily_usage WHERE id=?", ("daily",))
+        self.assertFalse(self.store.reserve_daily_usage(10))
+        self.assertFalse(storage.WorkspaceStore(self.path).reserve_daily_usage(10))
+
+    def test_daily_usage_duplicate_or_corrupt_counters_fail_closed(self):
+        today = storage._utc_day()
+        with closing(sqlite3.connect(self.path)) as connection, connection:
+            connection.execute("DROP TABLE daily_usage")
+            connection.execute("CREATE TABLE daily_usage (id TEXT, date TEXT, count)")
+        for rows in (
+            [("daily", today, 0), ("daily", today, 0)],
+            [("daily", "not-a-date", 0)], [("daily", today, -1)],
+            [("daily", today, 0.5)], [("daily", today, "0")],
+        ):
+            with self.subTest(rows=rows):
+                with closing(sqlite3.connect(self.path)) as connection, connection:
+                    connection.execute("DELETE FROM daily_usage")
+                    connection.executemany("INSERT INTO daily_usage VALUES (?, ?, ?)", rows)
+                self.assertFalse(storage.WorkspaceStore(self.path).reserve_daily_usage(10))
+                with closing(sqlite3.connect(self.path)) as connection:
+                    self.assertEqual(connection.execute("SELECT * FROM daily_usage").fetchall(), rows)
+
+    def test_daily_usage_zero_denies_and_invalid_limits_do_not_write(self):
+        self.assertFalse(self.store.reserve_daily_usage(0))
+        for limit in (-1, True, 1.5, "3", 2**63):
+            with self.subTest(limit=limit), self.assertRaises(ValueError):
+                self.store.reserve_daily_usage(limit)
+        self.assertTrue(self.store.reserve_daily_usage(1))
 
     def test_upsert_persistence_and_owner_isolation(self):
         self.store.upsert_leads("owner-a", [{"id": "shared", "title": "First"}])
@@ -73,6 +145,32 @@ class SQLiteWorkspaceTests(unittest.TestCase):
             {"role": "user", "content": "First"}, {"role": "assistant", "content": "Second"},
         ])
         self.assertEqual(reopened.messages("b", "shared"), [{"role": "assistant", "content": "Other owner"}])
+
+    def test_message_metadata_is_durable_scoped_and_preserves_legacy_shape(self):
+        metadata = {"sources": [{"url": "https://example.com/evidence", "title": "Evidence"}],
+                    "model": "actual-model", "usage": {"total_tokens": 12}}
+        self.store.append_message("owner", "conversation", "user", "Question")
+        self.store.append_message("owner", "conversation", "assistant", "Answer", metadata=metadata)
+        metadata["sources"][0]["title"] = "Modified input"
+        reopened = storage.WorkspaceStore(self.path)
+        messages = reopened.messages("owner", "conversation")
+        self.assertEqual(messages[0], {"role": "user", "content": "Question"})
+        self.assertEqual(messages[1], {"role": "assistant", "content": "Answer",
+                                      "sources": [{"url": "https://example.com/evidence", "title": "Evidence"}],
+                                      "model": "actual-model", "usage": {"total_tokens": 12}})
+        self.assertEqual(reopened.messages("other", "conversation"), [])
+        self.store.append_message("owner", "empty", "assistant", "Empty metadata", metadata={})
+        self.assertEqual(self.store.messages("owner", "empty"), [{"role": "assistant", "content": "Empty metadata"}])
+        self.store.append_message("owner", "partial", "assistant", "Sources only", metadata={"sources": []})
+        self.assertEqual(self.store.messages("owner", "partial"), [{"role": "assistant", "content": "Sources only", "sources": []}])
+
+    def test_message_metadata_rejects_unknown_fields_and_unbounded_json(self):
+        invalid = [{"role": "system"}, {"conversation_id": "other"}, {"extra": "field"}, [],
+                   {"usage": float("nan")}, {"sources": ["x" * storage.MAX_JSON_BYTES]}]
+        for metadata in invalid:
+            with self.subTest(metadata_type=type(metadata)), self.assertRaises(ValueError):
+                self.store.append_message("owner", "conversation", "assistant", "Answer", metadata=metadata)
+        self.assertEqual(self.store.messages("owner", "conversation"), [])
 
     def test_conversations_are_durable_owner_scoped_and_preview_first_user(self):
         self.store.append_message("a", "shared", "system", "Not the preview")
@@ -308,6 +406,55 @@ class SnowflakeWorkspaceTests(unittest.TestCase):
         self.assertIn("payload VARIANT", storage.SNOWFLAKE_SCHEMA_SQL)
         self.assertIn("PRIMARY KEY (record_type, owner, id)", storage.SNOWFLAKE_SCHEMA_SQL)
 
+    def test_daily_quota_seed_is_admin_only_and_does_not_reset_existing_counter(self):
+        self.assertIn("INSERT INTO RETAILSCOPE_WORKSPACE_RECORDS", storage.SNOWFLAKE_QUOTA_SQL)
+        self.assertIn("WHERE NOT EXISTS", storage.SNOWFLAKE_QUOTA_SQL)
+        self.assertIn("CONVERT_TIMEZONE('UTC'", storage.SNOWFLAKE_QUOTA_SQL)
+        self.assertIn("record_type='quota' AND owner='system' AND id='daily'", storage.SNOWFLAKE_QUOTA_SQL)
+        self.factory.assert_not_called()
+
+    def test_daily_usage_uses_one_atomic_singleton_update_with_bound_limits(self):
+        self.session.sql.return_value.collect.return_value = [(1,)]
+        with patch.object(storage, "_utc_day", return_value="2026-10-12"):
+            self.assertTrue(self.store.reserve_daily_usage(10))
+        self.session.sql.assert_called_once()
+        sql, params = self.session.sql.call_args.args[0], self.session.sql.call_args.kwargs["params"]
+        self.assertIn("UPDATE RETAILSCOPE_WORKSPACE_RECORDS", sql)
+        self.assertIn("SELECT COUNT(*)", sql)
+        self.assertIn("id='daily')=1", sql)
+        self.assertIn("payload:date::STRING<?", sql)
+        self.assertIn("TRY_TO_NUMBER(payload:count::STRING, 38, 0)<?", sql)
+        self.assertIn("IS_INTEGER(payload:count)", sql)
+        self.assertIn("TRY_TO_DATE", sql)
+        self.assertNotIn("MERGE", sql)
+        self.assertNotIn("INSERT", sql)
+        self.assertEqual(params, ["2026-10-12"] * 4 + [10])
+        self.assertEqual(sql.count("?"), len(params))
+        self.session.sql.return_value.collect.assert_called_once_with(
+            statement_params={"STATEMENT_TIMEOUT_IN_SECONDS": "30"}, log_on_exception=False,
+        )
+
+    def test_daily_usage_missing_duplicate_or_ambiguous_results_deny(self):
+        for result in ([], [(0,)], [(2,)], [(1,), (1,)]):
+            with self.subTest(result=result):
+                self.session.sql.return_value.collect.return_value = result
+                self.assertFalse(self.store.reserve_daily_usage(10))
+
+    def test_daily_usage_provider_error_propagates_without_retry_and_closes_owned_session(self):
+        owned = storage.SnowflakeWorkspaceStore(self.factory, close_owned_sessions=True)
+        self.session.sql.return_value.collect.side_effect = RuntimeError("quota unavailable")
+        with self.assertRaisesRegex(RuntimeError, "quota unavailable"):
+            owned.reserve_daily_usage(10)
+        self.session.sql.assert_called_once()
+        self.session.close.assert_called_once()
+
+    def test_daily_usage_invalid_limits_or_zero_never_connect(self):
+        self.assertFalse(self.store.reserve_daily_usage(0))
+        for limit in (-1, True, 1.5, "3", 2**63):
+            with self.subTest(limit=limit), self.assertRaises(ValueError):
+                self.store.reserve_daily_usage(limit)
+        self.factory.assert_not_called()
+
     def test_every_snowflake_execution_has_timeout_and_private_logging(self):
         collect = self.session.sql.return_value.collect
         operations = [
@@ -320,6 +467,7 @@ class SnowflakeWorkspaceTests(unittest.TestCase):
             lambda: self.store.messages("owner", "conversation"),
             lambda: self.store.list_conversations("owner"),
             lambda: self.store.pending_jobs(),
+            lambda: self.store.reserve_daily_usage(10),
         ]
         expected = {"statement_params": {"STATEMENT_TIMEOUT_IN_SECONDS": "30"}, "log_on_exception": False}
         for operation in operations:
@@ -380,6 +528,20 @@ class SnowflakeWorkspaceTests(unittest.TestCase):
         self.assertEqual(json.loads(params[3]), {
             "conversation_id": "conversation", "role": "user", "content": "Actual message",
         })
+
+    def test_message_metadata_is_bound_and_restored_without_internal_fields(self):
+        metadata = {"sources": [{"url": "https://example.com/evidence"}],
+                    "model": "actual-model", "usage": {"total_tokens": 12}}
+        self.store.append_message("owner", "conversation", "assistant", "Answer", metadata=metadata)
+        params = self.session.sql.call_args.kwargs["params"]
+        payload = json.loads(params[3])
+        self.assertEqual(payload, {"conversation_id": "conversation", "role": "assistant", "content": "Answer", **metadata})
+        self.session.sql.return_value.collect.return_value = [(json.dumps(payload),)]
+        self.assertEqual(self.store.messages("owner", "conversation"), [{"role": "assistant", "content": "Answer", **metadata}])
+        self.session.sql.reset_mock()
+        with self.assertRaises(ValueError):
+            self.store.append_message("owner", "conversation", "assistant", "Answer", metadata={"owner": "other"})
+        self.session.sql.assert_not_called()
 
     def test_job_updates_are_atomic_scoped_and_bound(self):
         self.session.sql.return_value.collect.return_value = [(1,)]
@@ -480,6 +642,7 @@ class SnowflakeWorkspaceTests(unittest.TestCase):
             lambda: owned.messages("owner", "c"),
             lambda: owned.list_conversations("owner"),
             lambda: owned.pending_jobs(),
+            lambda: owned.reserve_daily_usage(10),
         ]
         for operation in operations:
             with self.subTest(operation=operation):

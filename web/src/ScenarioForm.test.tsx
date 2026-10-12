@@ -47,28 +47,26 @@ it("converts percentage display to decimal API rates and omits blank optional in
 });
 
 it("starts required financial inputs blank and renders only server-calculated metrics", async () => {
-  const scenario = vi
-    .spyOn(api, "scenario")
-    .mockResolvedValue({
-      irr: null,
-      initial_equity: 1000000,
-      equity_multiple: 1.1,
-      annual_cash_flows: [
-        {
-          year: 1,
-          noi: 100000,
-          debt_service: 0,
-          operating_cash_flow: 100000,
-          equity_cash_flow: 1100000,
-        },
-      ],
-      assumptions: {
-        purchase_price: 1000000,
-        exit_cap_rate: 0.06,
-        hold_years: 7,
-        loan_to_value: 0,
+  const scenario = vi.spyOn(api, "scenario").mockResolvedValue({
+    irr: null,
+    initial_equity: 1000000,
+    equity_multiple: 1.1,
+    annual_cash_flows: [
+      {
+        year: 1,
+        noi: 100000,
+        debt_service: 0,
+        operating_cash_flow: 100000,
+        equity_cash_flow: 1100000,
       },
-    });
+    ],
+    assumptions: {
+      purchase_price: 1000000,
+      exit_cap_rate: 0.06,
+      hold_years: 7,
+      loan_to_value: 0,
+    },
+  });
   const onCalculated = vi.fn();
   const onInvalidate = vi.fn();
   const onAsk = vi.fn();

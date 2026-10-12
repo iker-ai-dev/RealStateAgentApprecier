@@ -109,6 +109,18 @@ class WorkspaceApiTests(unittest.TestCase):
         self.assertTrue(gate.is_active("owner", "research"))
         self.assertFalse(gate.is_active("owner", "chat"))
 
+    def test_long_conversation_is_bounded_for_the_model_without_losing_storage(self):
+        response = self.client.get("/api/status")
+        owner = self.client.cookies.get("retailscope_session").split(".")[1]
+        conversation = "a" * 32
+        for index in range(12):
+            self.store.append_message(owner, conversation, "user" if index % 2 == 0 else "assistant", "x" * 5000)
+        response = self.client.post("/api/chat", json={"message": "Continue", "conversation_id": conversation})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(self.calls[-1][2]), 8)
+        self.assertTrue(all(len(item["content"]) <= 3000 for item in self.calls[-1][2]))
+        self.assertEqual(len(self.store.messages(owner, conversation)[0]["content"]), 5000)
+
     @patch.dict(os.environ, {"RETAILSCOPE_MCP_SIGNING_KEY": "test-only-signing-key-" * 3})
     def test_mcp_uses_same_workspace_and_requires_signed_token(self):
         self.client.get("/api/status")

@@ -33,6 +33,7 @@ def main():
            and key != "RETAILSCOPE_REQUIRE_SNOWFLAKE"}
     demo_env["RETAILSCOPE_PUBLIC_DEMO"] = "true"
     env = dict(os.environ) if live else demo_env
+    key_path = None
     if live:
         env.pop("RETAILSCOPE_PUBLIC_DEMO", None)
         # Render supplies secrets as environment variables; the connector expects
@@ -41,6 +42,7 @@ def main():
         if encoded_key:
             key_path = Path("/tmp/retailscope-snowflake.p8")
             descriptor = os.open(key_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            os.fchmod(descriptor, 0o600)
             with os.fdopen(descriptor, "wb") as handle:
                 handle.write(base64.b64decode(encoded_key, validate=True))
             env["SNOWFLAKE_PRIVATE_KEY_FILE"] = str(key_path)
@@ -85,6 +87,8 @@ def main():
             except subprocess.TimeoutExpired:
                 child.kill()
                 child.wait()
+        if key_path is not None:
+            key_path.unlink(missing_ok=True)
     return exit_code
 
 

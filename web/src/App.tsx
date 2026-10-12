@@ -42,6 +42,7 @@ type Message = {
   text: string;
   sources?: ChatResult["sources"];
   model?: string;
+  usage?: unknown;
   scenarioAttached?: boolean;
 };
 type Conversation = { messages: Message[]; id?: string; error?: string };
@@ -149,7 +150,7 @@ export default function App() {
       .toLowerCase()
       .includes(filter.toLowerCase()),
   );
-  const isMcp = path.replace(/\/$/, "") === "/landing/mcp";
+  const isMcp = ["/landing", "/landing/mcp"].includes(path.replace(/\/$/, ""));
 
   useEffect(() => {
     const pop = () => {
@@ -170,7 +171,12 @@ export default function App() {
     setStatusError("");
     api
       .status(controller.signal)
-      .then((status) => { if (!controller.signal.aborted) { setProviders(status); setBootstrapReady(true); } })
+      .then((status) => {
+        if (!controller.signal.aborted) {
+          setProviders(status);
+          setBootstrapReady(true);
+        }
+      })
       .catch((error) => {
         if (!controller.signal.aborted) {
           setProviders(undefined);
@@ -189,6 +195,7 @@ export default function App() {
     api
       .leads(controller.signal)
       .then((result) => {
+        if (controller.signal.aborted) return;
         setLeads(result.leads);
         setLeadsLoading(false);
       })
@@ -208,6 +215,7 @@ export default function App() {
     api
       .conversations(controller.signal)
       .then((result) => {
+        if (controller.signal.aborted) return;
         setHistory(result.conversations);
         setHistoryLoading(false);
       })
@@ -230,6 +238,7 @@ export default function App() {
     api
       .conversation(restoreId, controller.signal)
       .then((thread) => {
+        if (controller.signal.aborted) return;
         if (thread.id !== restoreId)
           throw new Error("Conversation response belongs to another thread.");
         updateConversation("__general__", () => ({
@@ -238,6 +247,9 @@ export default function App() {
             id: `${thread.id}-${index}`,
             role: message.role,
             text: message.content,
+            sources: message.sources ?? undefined,
+            model: message.model ?? undefined,
+            usage: message.usage,
           })),
         }));
         setThreadLoading(false);
@@ -285,7 +297,7 @@ export default function App() {
     researchController.current = controller;
     const signal = AbortSignal.any([
       controller.signal,
-      AbortSignal.timeout(120_000),
+      AbortSignal.timeout(330_000),
     ]);
     setResearchBusy(true);
     setResearchFinished(false);
@@ -337,7 +349,13 @@ export default function App() {
 
   async function send(event: FormEvent) {
     event.preventDefault();
-    if (!bootstrapReady || threadLoading || !draft.trim() || chatController.current) return;
+    if (
+      !bootstrapReady ||
+      threadLoading ||
+      !draft.trim() ||
+      chatController.current
+    )
+      return;
     const key = contextKey;
     const message = draft.trim();
     const controller = new AbortController();
@@ -429,10 +447,10 @@ export default function App() {
       <header className="app-header">
         <a
           className="brand"
-          href="/landing"
+          href="/"
           onClick={(event) => {
             event.preventDefault();
-            navigate("/landing");
+            navigate("/");
           }}
         >
           <span className="brand-mark">
@@ -448,10 +466,10 @@ export default function App() {
           {providerPills}
           <a
             className={`connection-link ${isMcp ? "active" : ""}`}
-            href="/landing/mcp"
+            href="/landing"
             onClick={(event) => {
               event.preventDefault();
-              navigate("/landing/mcp");
+              navigate("/landing");
             }}
             title="MCP connections"
             aria-label="MCP"
@@ -461,9 +479,13 @@ export default function App() {
           </a>
         </div>
       </header>
-      {isMcp && statusError && <Notice onRetry={() => setStatusVersion(value => value + 1)}>API session unavailable. Please retry.</Notice>}
+      {isMcp && statusError && (
+        <Notice onRetry={() => setStatusVersion((value) => value + 1)}>
+          API session unavailable. Please retry.
+        </Notice>
+      )}
       {isMcp ? (
-        <Mcp ready={bootstrapReady} onBack={() => navigate("/landing")} />
+        <Mcp ready={bootstrapReady} onBack={() => navigate("/")} />
       ) : (
         <>
           {statusError && (
@@ -877,7 +899,9 @@ export default function App() {
                   onChange={(event) => setDraft(event.target.value)}
                   maxLength={4000}
                   rows={2}
-                    disabled={!bootstrapReady || Boolean(chatBusyKey) || threadLoading}
+                  disabled={
+                    !bootstrapReady || Boolean(chatBusyKey) || threadLoading
+                  }
                   onKeyDown={(event) => {
                     if (
                       event.key === "Enter" &&
@@ -933,7 +957,10 @@ export default function App() {
                       title="Send message"
                       aria-label="Send message"
                       disabled={
-                        !bootstrapReady || !draft.trim() || Boolean(chatBusyKey) || threadLoading
+                        !bootstrapReady ||
+                        !draft.trim() ||
+                        Boolean(chatBusyKey) ||
+                        threadLoading
                       }
                     >
                       <ArrowUp size={18} />
@@ -986,7 +1013,13 @@ export default function App() {
                           ) {
                             event.preventDefault();
                             const next =
-                              event.key === "Home" ? "overview" : event.key === "End" ? "scenario" : tab === "overview" ? "scenario" : "overview";
+                              event.key === "Home"
+                                ? "overview"
+                                : event.key === "End"
+                                  ? "scenario"
+                                  : tab === "overview"
+                                    ? "scenario"
+                                    : "overview";
                             setPropertyTab(next);
                             document
                               .getElementById(`property-tab-${next}`)

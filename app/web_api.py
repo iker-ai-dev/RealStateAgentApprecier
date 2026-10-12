@@ -57,10 +57,11 @@ class ChatRequest(BaseModel):
 class UsageGate:
     """Bound paid calls and concurrency, including when cookies are discarded."""
 
-    def __init__(self):
+    def __init__(self, reserve_daily=None):
         self.lock = threading.Lock()
         self.events = defaultdict(deque)
         self.active = defaultdict(set)
+        self.reserve_daily = reserve_daily
 
     def reserve(self, owner, ip, kind="request"):
         now = time.monotonic()
@@ -76,6 +77,14 @@ class UsageGate:
                     queue.popleft()
                 if len(queue) >= limit:
                     raise HTTPException(429, "Research allowance reached. Please try again later.")
+            if self.reserve_daily is not None:
+                try:
+                    permitted = self.reserve_daily(limits[0][2])
+                except Exception as exc:
+                    capture_exception(exc)
+                    raise HTTPException(503, "Usage accounting is unavailable. No paid research was started.") from None
+                if not permitted:
+                    raise HTTPException(429, "The daily research allowance has been reached.")
             for key, _, _ in limits:
                 self.events[key].append(now)
             self.active[owner].add(kind)
@@ -100,6 +109,7 @@ def create_app(*, store=None, research_fn=None, analyze_fn=None):
     if store is None:
         from app.workspace_store import get_store
         store = get_store()
+    needs_nimble_key = research_fn is None
     if research_fn is None:
         from app.live_discovery import research
         research_fn = research
@@ -107,7 +117,7 @@ def create_app(*, store=None, research_fn=None, analyze_fn=None):
         from app.live_agent import analyze
         analyze_fn = analyze
     executor = ThreadPoolExecutor(max_workers=3, thread_name_prefix="retailscope-research")
-    gate = UsageGate()
+    gate = UsageGate(store.reserve_daily_usage)
     session_key = browser_signing_key()
 
     @asynccontextmanager
@@ -219,6 +229,8 @@ def create_app(*, store=None, research_fn=None, analyze_fn=None):
 
     @app.post("/api/research", status_code=202)
     def start_research(payload: ResearchRequest, request: Request):
+        if needs_nimble_key and not os.getenv("NIMBLE_API_KEY", "").strip():
+            raise HTTPException(503, "Live discovery is unavailable: Nimble access is not configured.")
         owner = request.state.owner
         gate.reserve(owner, request.client.host if request.client else "unknown", "research")
         try:
@@ -270,13 +282,15 @@ def create_app(*, store=None, research_fn=None, analyze_fn=None):
         gate.reserve(owner, request.client.host if request.client else "unknown", "chat")
         conversation_id = payload.conversation_id or secrets.token_hex(16)
         try:
-            history = store.messages(owner, conversation_id)[-12:]
+            history = [{"role": item["role"], "content": item["content"][:3000]}
+                       for item in store.messages(owner, conversation_id)[-8:]]
             kwargs = {"history": history}
             if payload.scenario:
                 kwargs["scenario"] = calculate_scenario(payload.scenario)
             result = analyze_fn(payload.message, selected[:10], **kwargs)
             store.append_message(owner, conversation_id, "user", payload.message)
-            store.append_message(owner, conversation_id, "assistant", result["answer"])
+            metadata = {key: result[key] for key in ("sources", "model", "usage") if key in result}
+            store.append_message(owner, conversation_id, "assistant", result["answer"], metadata=metadata)
             return {**result, "conversation_id": conversation_id}
         except Exception as exc:
             capture_exception(exc)

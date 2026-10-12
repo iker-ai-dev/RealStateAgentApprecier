@@ -11,7 +11,7 @@ import { api } from "./api";
 import { Markdown } from "./Markdown";
 
 beforeEach(() => {
-  window.history.replaceState({}, "", "/landing");
+  window.history.replaceState({}, "", "/");
   vi.spyOn(api, "status").mockResolvedValue({
     providers: { snowflake: true, nimble: false },
     model: "API model",
@@ -57,15 +57,13 @@ describe("workspace", () => {
         },
       ],
     });
-    const chat = vi
-      .spyOn(api, "chat")
-      .mockResolvedValue({
-        answer: "**Source-grounded answer**",
-        sources: [
-          { title: "Listing source", url: "https://example.org/property" },
-        ],
-        conversation_id: "conversation1",
-      });
+    const chat = vi.spyOn(api, "chat").mockResolvedValue({
+      answer: "**Source-grounded answer**",
+      sources: [
+        { title: "Listing source", url: "https://example.org/property" },
+      ],
+      conversation_id: "conversation1",
+    });
     render(<App />);
     await screen.findByText("Your next opportunity starts here");
     fireEvent.change(screen.getByLabelText("Research brief"), {
@@ -168,13 +166,11 @@ describe("workspace", () => {
       annual_cash_flows: [],
       assumptions: { purchase_price: 1000000 },
     });
-    const chat = vi
-      .spyOn(api, "chat")
-      .mockResolvedValue({
-        answer: "Scenario interpretation",
-        sources: [],
-        conversation_id: "c1",
-      });
+    const chat = vi.spyOn(api, "chat").mockResolvedValue({
+      answer: "Scenario interpretation",
+      sources: [],
+      conversation_id: "c1",
+    });
     render(<App />);
     fireEvent.click(
       await screen.findByRole("button", { name: /API property/ }),
@@ -204,7 +200,10 @@ describe("workspace", () => {
     });
   });
   it("renders the MCP route and copies exact remote registration", async () => {
-    vi.spyOn(api, "mcpToken").mockResolvedValue({ token: "test-secret", expires_at: Math.floor(Date.now() / 1000) + 604800 });
+    vi.spyOn(api, "mcpToken").mockResolvedValue({
+      token: "test-secret",
+      expires_at: Math.floor(Date.now() / 1000) + 604800,
+    });
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, "clipboard", {
       value: { writeText },
@@ -212,12 +211,21 @@ describe("workspace", () => {
     });
     render(<App />);
     fireEvent.click(screen.getByRole("link", { name: "MCP" }));
-    expect(window.location.pathname).toBe("/landing/mcp");
+    expect(window.location.pathname).toBe("/landing");
     expect(screen.queryByRole("tab", { name: "Claude Code" })).toBeNull();
-    await waitFor(() => expect(screen.getByRole("button", { name: "Generate access token" })).toBeEnabled());
-    fireEvent.click(screen.getByRole("button", { name: "Generate access token" }));
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Generate access token" }),
+      ).toBeEnabled(),
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "Generate access token" }),
+    );
     await screen.findByRole("tab", { name: "Claude Code" });
-    expect(screen.getByLabelText("Workspace token")).toHaveAttribute("type", "password");
+    expect(screen.getByLabelText("Workspace token")).toHaveAttribute(
+      "type",
+      "password",
+    );
     expect(document.body.textContent).not.toContain("test-secret");
     fireEvent.click(screen.getByRole("tab", { name: "Claude Code" }));
     fireEvent.click(
@@ -229,47 +237,127 @@ describe("workspace", () => {
       ),
     );
     fireEvent.click(screen.getByRole("button", { name: "Workspace" }));
-    expect(window.location.pathname).toBe("/landing");
+    expect(window.location.pathname).toBe("/");
   });
   it("restores a selected persisted thread after reload via the URL", async () => {
-    window.history.replaceState({}, "", "/landing?conversation=saved1");
-    const detail = vi.spyOn(api, "conversation").mockResolvedValue({ id: "saved1", messages: [{ role: "user", content: "Saved question" }, { role: "assistant", content: "Persisted API answer" }] });
-    vi.spyOn(api, "conversations").mockResolvedValue({ conversations: [{ id: "saved1", updated_at: "2026-10-12", preview: "Saved question" }] });
-    const first = render(<App />); await screen.findByText("Persisted API answer");
+    window.history.replaceState({}, "", "/?conversation=saved1");
+    const detail = vi.spyOn(api, "conversation").mockResolvedValue({
+      id: "saved1",
+      messages: [
+        { role: "user", content: "Saved question" },
+        {
+          role: "assistant",
+          content: "Persisted API answer",
+          sources: [
+            {
+              title: "Persisted evidence",
+              url: "https://example.org/evidence",
+            },
+            { title: "Unsafe source", url: "javascript:alert(1)" },
+          ],
+          model: "Saved Cortex model",
+          usage: { tokens: 25 },
+        },
+      ],
+    });
+    vi.spyOn(api, "conversations").mockResolvedValue({
+      conversations: [
+        { id: "saved1", updated_at: "2026-10-12", preview: "Saved question" },
+      ],
+    });
+    const first = render(<App />);
+    await screen.findByText("Persisted API answer");
     expect(screen.getByLabelText("Chat history")).toHaveValue("saved1");
-    first.unmount(); render(<App />); await screen.findByText("Persisted API answer");
+    first.unmount();
+    render(<App />);
+    await screen.findByText("Persisted API answer");
     expect(detail).toHaveBeenCalledTimes(2);
+    expect(
+      screen.getByRole("link", { name: "Persisted evidence" }),
+    ).toHaveAttribute("href", "https://example.org/evidence");
+    expect(
+      screen.getByRole("link", { name: "Persisted evidence" }),
+    ).toHaveAttribute("rel", "noopener noreferrer");
+    expect(screen.getByText("Saved Cortex model")).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Unsafe source" })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "New conversation" }));
-    expect(window.location.search).toBe(""); expect(screen.queryByText("Persisted API answer")).toBeNull();
+    expect(window.location.search).toBe("");
+    expect(screen.queryByText("Persisted API answer")).toBeNull();
   });
   it("selects saved history and retains its conversation id when continuing", async () => {
-    vi.spyOn(api, "conversations").mockResolvedValue({ conversations: [{ id: "saved1", updated_at: 123, preview: "Prior research" }] });
-    vi.spyOn(api, "conversation").mockResolvedValue({ id: "saved1", messages: [{ role: "assistant", content: "Previous analysis" }] });
-    const chat = vi.spyOn(api, "chat").mockResolvedValue({ answer: "Continued analysis", sources: [], conversation_id: "saved1" });
-    render(<App />); await screen.findByRole("option", { name: "Prior research" });
-    fireEvent.change(screen.getByLabelText("Chat history"), { target: { value: "saved1" } }); await screen.findByText("Previous analysis");
-    fireEvent.change(screen.getByLabelText("Message RetailScope"), { target: { value: "Continue" } }); fireEvent.click(screen.getByRole("button", { name: "Send message" })); await screen.findByText("Continued analysis");
-    expect(chat).toHaveBeenCalledWith({ message: "Continue", conversation_id: "saved1" }, expect.any(AbortSignal));
+    vi.spyOn(api, "conversations").mockResolvedValue({
+      conversations: [
+        { id: "saved1", updated_at: 123, preview: "Prior research" },
+      ],
+    });
+    vi.spyOn(api, "conversation").mockResolvedValue({
+      id: "saved1",
+      messages: [{ role: "assistant", content: "Previous analysis" }],
+    });
+    const chat = vi.spyOn(api, "chat").mockResolvedValue({
+      answer: "Continued analysis",
+      sources: [],
+      conversation_id: "saved1",
+    });
+    render(<App />);
+    await screen.findByRole("option", { name: "Prior research" });
+    fireEvent.change(screen.getByLabelText("Chat history"), {
+      target: { value: "saved1" },
+    });
+    await screen.findByText("Previous analysis");
+    fireEvent.change(screen.getByLabelText("Message RetailScope"), {
+      target: { value: "Continue" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+    await screen.findByText("Continued analysis");
+    expect(chat).toHaveBeenCalledWith(
+      { message: "Continue", conversation_id: "saved1" },
+      expect.any(AbortSignal),
+    );
   });
 });
 
 it("bootstraps the session before loading leads or history", async () => {
-  let resolve!: (value: { providers: { snowflake: boolean; nimble: boolean }; model: string }) => void;
-  vi.spyOn(api, "status").mockImplementation(() => new Promise(done => { resolve = done; }));
+  let resolve!: (value: {
+    providers: { snowflake: boolean; nimble: boolean };
+    model: string;
+  }) => void;
+  vi.spyOn(api, "status").mockImplementation(
+    () =>
+      new Promise((done) => {
+        resolve = done;
+      }),
+  );
   const leads = vi.spyOn(api, "leads").mockResolvedValue({ leads: [] });
-  const history = vi.spyOn(api, "conversations").mockResolvedValue({ conversations: [] });
+  const history = vi
+    .spyOn(api, "conversations")
+    .mockResolvedValue({ conversations: [] });
   render(<App />);
-  expect(leads).not.toHaveBeenCalled(); expect(history).not.toHaveBeenCalled();
-  resolve({ providers: { snowflake: false, nimble: false }, model: "API model" });
-  await waitFor(() => { expect(leads).toHaveBeenCalledOnce(); expect(history).toHaveBeenCalledOnce(); });
+  expect(leads).not.toHaveBeenCalled();
+  expect(history).not.toHaveBeenCalled();
+  resolve({
+    providers: { snowflake: false, nimble: false },
+    model: "API model",
+  });
+  await waitFor(() => {
+    expect(leads).toHaveBeenCalledOnce();
+    expect(history).toHaveBeenCalledOnce();
+  });
 });
 
 it("surfaces token configuration errors without exposing install commands", async () => {
-  vi.spyOn(api, "mcpToken").mockRejectedValue(new Error("Workspace MCP access is not configured."));
-  render(<App />); await screen.findByText("Your next opportunity starts here");
-  fireEvent.click(screen.getByRole("link", { name: "MCP" })); fireEvent.click(screen.getByRole("button", { name: "Generate access token" }));
+  vi.spyOn(api, "mcpToken").mockRejectedValue(
+    new Error("Workspace MCP access is not configured."),
+  );
+  render(<App />);
+  await screen.findByText("Your next opportunity starts here");
+  fireEvent.click(screen.getByRole("link", { name: "MCP" }));
+  fireEvent.click(
+    screen.getByRole("button", { name: "Generate access token" }),
+  );
   await screen.findByText("Workspace MCP access is not configured.");
-  expect(screen.queryByRole("tab", { name: "Codex" })).toBeNull(); expect(screen.queryByLabelText("Workspace token")).toBeNull();
+  expect(screen.queryByRole("tab", { name: "Codex" })).toBeNull();
+  expect(screen.queryByLabelText("Workspace token")).toBeNull();
 });
 
 it("renders Markdown with safe links and no raw HTML or image requests", () => {
