@@ -353,7 +353,12 @@ class LiveAgentTests(unittest.TestCase):
         self.assertEqual(quote['properties']['source_id']['enum'], ['lead-a'])
         excerpts = quote['properties']['quote']['enum']
         self.assertTrue(excerpts)
-        self.assertTrue(all(excerpt in LEADS[0]['summary'] for excerpt in excerpts))
+        options = agent._quote_options(LEADS)
+        self.assertTrue(all(options[key]['quote'] in LEADS[0]['summary'] for key in excerpts))
+        response = analysis()
+        response['paragraphs'][0]['quotes'][0]['quote'] = excerpts[0]
+        self.provider.complete.return_value = agent.Completion(response, {}, agent.DEFAULT_MODEL)
+        self.assertTrue(self.run_analysis()['sources'])
 
     def test_numbered_diligence_actions_and_code_computed_cap_spread_are_not_false_failures(self):
         from app.underwriting import Scenario, calculate_scenario
