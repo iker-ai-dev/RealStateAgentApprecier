@@ -217,6 +217,9 @@ def create_app(*, store=None, research_fn=None, analyze_fn=None):
                 if current is None or current["status"] != "running":
                     return
                 store.upsert_leads(owner, found)
+                store.append_message(owner, job_id, "user", query)
+                store.append_message(owner, job_id, "assistant", report["answer"],
+                                     metadata={key: report[key] for key in ("sources", "model", "usage") if key in report})
                 store.update_job(owner, job_id, "completed", leads=found, analysis=report,
                                  expected_status="running")
             else:

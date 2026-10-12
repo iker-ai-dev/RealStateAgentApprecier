@@ -317,6 +317,7 @@ export default function App() {
         if (result.analysis) {
           updateConversation("__general__", (current) => ({
             ...current,
+            id: current.id ?? job.id,
             messages: [
               ...current.messages,
               { id: `${job.id}-brief`, role: "user", text: query.trim() },
@@ -329,6 +330,7 @@ export default function App() {
               },
             ],
           }));
+          setHistoryVersion((version) => version + 1);
           setView("chat");
         }
       }
@@ -336,7 +338,7 @@ export default function App() {
       if (!controller.signal.aborted)
         setResearchError(
           signal.aborted
-            ? "Research timed out after two minutes. Please try again later."
+            ? "Research timed out. Please try again later."
             : errorMessage(error),
         );
     } finally {

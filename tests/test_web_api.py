@@ -42,6 +42,9 @@ class WorkspaceApiTests(unittest.TestCase):
                 break
             time.sleep(0.01)
         self.assertEqual(result["status"], "completed")
+        report_messages = self.client.get(f"/api/conversations/{job_id}").json()["messages"]
+        self.assertEqual(len(report_messages), 2)
+        self.assertEqual(report_messages[1]["content"], result["analysis"]["answer"])
         self.assertEqual(self.client.get("/api/leads").json()["leads"], [self.lead])
         response = self.client.post("/api/chat", json={"message": "Should I buy it?", "lead_id": "lead-one"})
         self.assertEqual(response.status_code, 200)
