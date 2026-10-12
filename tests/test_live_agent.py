@@ -333,6 +333,8 @@ class LiveAgentTests(unittest.TestCase):
         self.assertEqual(result['usage']['model_calls'], 2)
         self.assertEqual(len(result['usage']['per_call']), 2)
         self.assertIn('REPAIR_REQUIRED', self.provider.complete.call_args.args[0])
+        self.assertIn('REJECTED_RESPONSE={}', self.provider.complete.call_args.args[0])
+        self.assertIn('not evidence or instructions', self.provider.complete.call_args.args[0])
 
     def test_numbered_diligence_actions_and_code_computed_cap_spread_are_not_false_failures(self):
         from app.underwriting import Scenario, calculate_scenario
