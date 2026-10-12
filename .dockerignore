@@ -12,3 +12,6 @@ sites
 .env*
 * 2
 * 2.*
+.retailscope
+web/node_modules
+web/dist

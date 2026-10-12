@@ -5,6 +5,7 @@ import importlib.util
 import os
 from pathlib import Path
 import sys
+import tomllib
 from typing import Any
 
 import pandas as pd
@@ -101,6 +102,15 @@ def _try_load_snowflake(*, require_snowflake: bool = False) -> PropertyDataset |
 def get_snowflake_config() -> dict[str, Any]:
     if os.getenv("RETAILSCOPE_PUBLIC_DEMO") == "true":
         return {}
+    local_cfg = {}
+    connection_name = os.getenv("SNOWFLAKE_CONNECTION_NAME")
+    if connection_name:
+        config_path = Path.home() / ".snowflake" / "config.toml"
+        with config_path.open("rb") as handle:
+            config = tomllib.load(handle)
+        local_cfg = dict(config.get("connections", {}).get(connection_name, {}))
+        if not local_cfg:
+            raise ValueError("The named Snowflake connection was not found.")
     try:
         app_cfg = dict(st.secrets.get("snowflake", {}))
     except Exception:
@@ -129,25 +139,34 @@ def get_snowflake_config() -> dict[str, Any]:
     }
     env_cfg = {key: value for key, value in env_cfg.items() if value}
 
-    return {**connection_cfg, **app_cfg, **env_cfg}
+    return {**local_cfg, **connection_cfg, **app_cfg, **env_cfg}
+
+
+def get_managed_snowpark_session():
+    """Only Snowflake-hosted code may borrow the process's active session."""
+    try:
+        import _snowflake  # noqa: F401
+    except ImportError:
+        return None
+    from snowflake.snowpark import Session
+    return Session.get_active_session()
 
 
 def get_snowpark_session(cfg: dict[str, Any] | None = None):
     cfg = cfg or get_snowflake_config()
-    try:
-        from snowflake.snowpark.context import get_active_session
+    managed = get_managed_snowpark_session()
+    if managed is not None:
+        return managed
+    from snowflake.snowpark import Session
 
-        return get_active_session()
-    except Exception:
-        from snowflake.snowpark import Session
-
-        connection_parameters = {
-            key: cfg[key]
-            for key in ("account", "user", "password", "role", "warehouse", "database", "schema",
-                        "authenticator", "private_key_file")
-            if cfg.get(key)
-        }
-        return Session.builder.configs(connection_parameters).create()
+    connection_parameters = {
+        key: cfg[key]
+        for key in ("account", "user", "password", "role", "warehouse", "database", "schema",
+                    "authenticator", "private_key_file")
+        if cfg.get(key)
+    }
+    connection_parameters.update(login_timeout=20, network_timeout=30, socket_timeout=30)
+    return Session.builder.configs(connection_parameters).create()
 
 
 def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
