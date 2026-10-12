@@ -22,6 +22,7 @@ from starlette.routing import Route
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from app.data_access import get_snowflake_config
+from app.live_agent import LiveAgentError
 from app.observability import capture_exception, init_sentry
 from app.underwriting import Scenario, calculate_scenario
 from app.workspace_tokens import (browser_signing_key, issue_browser_session,
@@ -222,8 +223,12 @@ def create_app(*, store=None, research_fn=None, analyze_fn=None):
                 store.update_job(owner, job_id, "completed", leads=[], expected_status="running")
         except Exception as exc:
             capture_exception(exc)
+            error = "Live research could not finish. Please retry or check provider access."
+            if isinstance(exc, LiveAgentError):
+                # LiveAgentError contains only host-authored validation reasons.
+                error = str(exc)
             store.update_job(owner, job_id, "failed", expected_status="running",
-                             error="Live research could not finish. Please retry or check provider access.")
+                             error=error)
         finally:
             gate.release(owner, "research")
 

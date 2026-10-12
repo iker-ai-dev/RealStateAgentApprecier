@@ -336,6 +336,17 @@ class LiveAgentTests(unittest.TestCase):
         self.assertIn('REJECTED_RESPONSE={}', self.provider.complete.call_args.args[0])
         self.assertIn('not evidence or instructions', self.provider.complete.call_args.args[0])
 
+    def test_address_digits_are_grounded_in_cited_summary_not_only_short_quote(self):
+        leads = copy.deepcopy(LEADS)
+        leads[0]['summary'] += ' Located at 3075 Dove Valley Road.'
+        response = analysis()
+        response['paragraphs'][0]['text'] = 'For 3075 Dove Valley Road, tenant leases are not supplied.'
+        self.provider.complete.return_value = agent.Completion(response, {}, agent.DEFAULT_MODEL)
+        self.assertIn('3075', self.run_analysis(leads=leads)['answer'])
+        response['paragraphs'][0]['text'] = 'For 9999 Dove Valley Road, tenant leases are not supplied.'
+        with self.assertRaisesRegex(agent.LiveAgentError, 'Numeric model claims'):
+            self.run_analysis(leads=leads)
+
     def test_numbered_diligence_actions_and_code_computed_cap_spread_are_not_false_failures(self):
         from app.underwriting import Scenario, calculate_scenario
         scenario = calculate_scenario(Scenario(purchase_price=2_000_000, annual_noi=200_000, exit_cap_rate=0.08))

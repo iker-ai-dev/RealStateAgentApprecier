@@ -378,6 +378,9 @@ def _validate_citations(state: State) -> dict[str, Any]:
                                      "Copy a shorter exact substring from the cited summary; do not complete truncated text.")
             supported_numbers.update(numbers(excerpt))
         for source_id in source_ids:
+            # Numeric provenance belongs to the cited source, not just the short
+            # display quotation (which may omit its street address or date).
+            supported_numbers.update(numbers(evidence[source_id]['summary']))
             date = evidence[source_id]['retrieved_at']
             if re.fullmatch(r'\d{4}-\d{2}-\d{2}(?:T.*)?', date):
                 supported_numbers.update(numbers(date))
