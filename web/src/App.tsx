@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
+import { requestSignal } from "./requestSignal";
 import {
   ArrowDown,
   ArrowUp,
@@ -295,10 +296,8 @@ export default function App() {
     setLeadsLoading(false);
     const controller = new AbortController();
     researchController.current = controller;
-    const signal = AbortSignal.any([
-      controller.signal,
-      AbortSignal.timeout(330_000),
-    ]);
+    const pending = requestSignal(controller.signal, 330_000);
+    const signal = pending.signal;
     setResearchBusy(true);
     setResearchFinished(false);
     setResearchError("");
@@ -342,6 +341,7 @@ export default function App() {
             : errorMessage(error),
         );
     } finally {
+      pending.dispose();
       if (researchController.current === controller) {
         researchController.current = null;
         setResearchBusy(false);

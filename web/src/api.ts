@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { requestSignal } from "./requestSignal";
 
 export const leadSchema = z.object({
   id: z.string(),
@@ -96,39 +97,43 @@ async function request<S extends z.ZodTypeAny>(
   signal?: AbortSignal,
   body?: unknown,
 ): Promise<z.output<S>> {
-  const timeout = AbortSignal.timeout(path === "/chat" ? 240_000 : 30_000);
-  const response = await fetch(`/api${path}`, {
-    method: body === undefined ? "GET" : "POST",
-    headers:
-      body === undefined
-        ? { Accept: "application/json" }
-        : { Accept: "application/json", "Content-Type": "application/json" },
-    body: body === undefined ? undefined : JSON.stringify(body),
-    signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
-  });
-  if (!response.ok) {
-    let detail = "";
-    try {
-      const payload = await response.json();
-      if (typeof payload.detail === "string")
-        detail = payload.detail.slice(0, 500);
-    } catch {
-      /* Gateways may return non-JSON errors. */
-    }
-    throw new Error(
-      detail || `Request failed (${response.status}). Please try again.`,
-    );
-  }
-  let json: unknown;
+  const pending = requestSignal(signal, path === "/chat" ? 240_000 : 30_000);
   try {
-    json = await response.json();
-  } catch {
-    throw new Error("The API returned an unreadable response.");
+    const response = await fetch(`/api${path}`, {
+      method: body === undefined ? "GET" : "POST",
+      headers:
+        body === undefined
+          ? { Accept: "application/json" }
+          : { Accept: "application/json", "Content-Type": "application/json" },
+      body: body === undefined ? undefined : JSON.stringify(body),
+      signal: pending.signal,
+    });
+    if (!response.ok) {
+      let detail = "";
+      try {
+        const payload = await response.json();
+        if (typeof payload.detail === "string")
+          detail = payload.detail.slice(0, 500);
+      } catch {
+        /* Gateways may return non-JSON errors. */
+      }
+      throw new Error(
+        detail || `Request failed (${response.status}). Please try again.`,
+      );
+    }
+    let json: unknown;
+    try {
+      json = await response.json();
+    } catch {
+      throw new Error("The API returned an unreadable response.");
+    }
+    const result = schema.safeParse(json);
+    if (!result.success)
+      throw new Error("The API response did not match the expected format.");
+    return result.data;
+  } finally {
+    pending.dispose();
   }
-  const result = schema.safeParse(json);
-  if (!result.success)
-    throw new Error("The API response did not match the expected format.");
-  return result.data;
 }
 
 export const api = {
