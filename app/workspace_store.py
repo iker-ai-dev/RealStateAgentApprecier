@@ -596,10 +596,9 @@ def get_store() -> WorkspaceStore | SnowflakeWorkspaceStore:
     if provider == "snowflake":
         @contextmanager
         def session_factory():
-            from app.data_access import get_snowflake_config, get_snowpark_session
-            from snowflake.snowpark import Session
+            from app.data_access import get_managed_snowpark_session, get_snowflake_config, get_snowpark_session
 
-            session = Session.get_active_session()
+            session = get_managed_snowpark_session()
             if session is None:
                 with closing(get_snowpark_session(get_snowflake_config())) as session:
                     yield session

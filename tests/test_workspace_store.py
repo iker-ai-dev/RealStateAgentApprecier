@@ -621,7 +621,7 @@ class SnowflakeWorkspaceTests(unittest.TestCase):
     def test_explicit_provider_uses_configured_session_factory(self):
         with patch.dict(os.environ, {"RETAILSCOPE_STORAGE": "snowflake"}), \
                 patch("app.data_access.get_snowflake_config", return_value={"account": "private"}), \
-                patch("snowflake.snowpark.Session.get_active_session", return_value=None), \
+                patch("app.data_access.get_managed_snowpark_session", return_value=None), \
                 patch("app.data_access.get_snowpark_session", return_value=self.session) as factory:
             store = storage.get_store()
             self.assertIsInstance(store, storage.SnowflakeWorkspaceStore)
@@ -686,7 +686,7 @@ class SnowflakeWorkspaceTests(unittest.TestCase):
 
     def test_default_factory_does_not_close_managed_active_session(self):
         with patch.dict(os.environ, {"RETAILSCOPE_STORAGE": "snowflake"}), \
-                patch("snowflake.snowpark.Session.get_active_session", return_value=self.session), \
+                patch("app.data_access.get_managed_snowpark_session", return_value=self.session), \
                 patch("app.data_access.get_snowpark_session") as create:
             store = storage.get_store()
             store.list_leads("owner")
@@ -698,7 +698,7 @@ class SnowflakeWorkspaceTests(unittest.TestCase):
 
     def test_default_factory_closes_owned_session_on_query_error(self):
         with patch.dict(os.environ, {"RETAILSCOPE_STORAGE": "snowflake"}), \
-                patch("snowflake.snowpark.Session.get_active_session", return_value=None), \
+                patch("app.data_access.get_managed_snowpark_session", return_value=None), \
                 patch("app.data_access.get_snowpark_session", return_value=self.session):
             self.session.sql.return_value.collect.side_effect = RuntimeError("query failed")
             with self.assertRaises(RuntimeError):
@@ -707,7 +707,7 @@ class SnowflakeWorkspaceTests(unittest.TestCase):
 
     def test_active_session_lookup_failure_is_not_retried_or_replaced(self):
         with patch.dict(os.environ, {"RETAILSCOPE_STORAGE": "snowflake"}), \
-                patch("snowflake.snowpark.Session.get_active_session", side_effect=RuntimeError("ambiguous sessions")) as active, \
+                patch("app.data_access.get_managed_snowpark_session", side_effect=RuntimeError("ambiguous sessions")) as active, \
                 patch("app.data_access.get_snowpark_session") as create:
             with self.assertRaisesRegex(RuntimeError, "ambiguous sessions"):
                 storage.get_store().list_leads("owner")

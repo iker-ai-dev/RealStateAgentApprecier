@@ -46,11 +46,8 @@ class AnalysisProvider(Protocol):
 
 
 def _active_session():
-    try:
-        from snowflake.snowpark.context import get_active_session
-        return get_active_session()
-    except Exception:
-        return None
+    from app.data_access import get_managed_snowpark_session
+    return get_managed_snowpark_session()
 
 
 def _usage(value: Any) -> dict[str, int]:
