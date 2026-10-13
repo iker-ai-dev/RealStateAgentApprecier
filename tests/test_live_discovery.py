@@ -149,7 +149,8 @@ class ResearchTests(unittest.TestCase):
         self.assertEqual(len(rows), 3)
         searches = [call for call, _ in session.calls if call["method"] == "tools/call"]
         self.assertEqual(len(searches), 3)
-        self.assertEqual(searches[0]["params"]["arguments"]["query"], "Austin TX")
+        self.assertEqual(searches[0]["params"]["arguments"]["query"],
+                         "open-air strip shopping centers for sale broker listings Austin TX")
         for search in searches:
             args = search["params"]["arguments"]
             self.assertEqual(search["params"]["name"], "nimble_search")
@@ -167,6 +168,22 @@ class ResearchTests(unittest.TestCase):
                 patch("nimble_mcp.requests.Session", return_value=session):
             self.assertEqual(len(research("Austin TX")), 10)
         self.assertEqual(sum(call["method"] == "tools/call" for call, _ in session.calls), 1)
+
+    def test_first_search_resolves_retail_intent_without_changing_market_names(self):
+        for brief, expected in (
+                ('Research centers in Phoenix with redevelopment potential',
+                 'shopping centers in Phoenix with redevelopment potential'),
+                ('Research Triangle shopping centers', 'Research Triangle shopping centers')):
+            with self.subTest(brief=brief):
+                records = [dict(RECORD, url=f'https://broker.example/{i}') for i in range(10)]
+                session = FixtureSession([{'content': [], 'structuredContent': {'results': records}}])
+                with patch.dict(os.environ, {'NIMBLE_API_KEY': 'synthetic'}, clear=True), \
+                        patch('nimble_mcp.requests.Session', return_value=session):
+                    research(brief)
+                searches = [call for call, _ in session.calls if call['method'] == 'tools/call']
+                self.assertEqual(len(searches), 1)
+                self.assertEqual(searches[0]['params']['arguments']['query'],
+                                 'open-air strip shopping centers for sale broker listings ' + expected)
 
     def test_failure_never_retries_or_returns_cached_partial_results(self):
         session = FixtureSession([{"content": [], "structuredContent": {"results": [RECORD]}},
@@ -197,11 +214,13 @@ class ResearchTests(unittest.TestCase):
         self.assertTrue(rows[0]["last_retrieved_at"])
 
     def test_maximum_query_length_still_uses_valid_bounded_search(self):
-        session = FixtureSession([{"content": [], "structuredContent": {"results": []}}])
+        session = FixtureSession([{"content": [], "structuredContent": {"results": []}} for _ in range(3)])
         with patch.dict(os.environ, {"NIMBLE_API_KEY": "synthetic"}, clear=True), \
                 patch("nimble_mcp.requests.Session", return_value=session):
             self.assertEqual(research("x" * 4000), [])
-        self.assertEqual(sum(call["method"] == "tools/call" for call, _ in session.calls), 1)
+        searches = [call for call, _ in session.calls if call['method'] == 'tools/call']
+        self.assertEqual(len(searches), 3)
+        self.assertTrue(all(len(call['params']['arguments']['query']) <= 4000 for call in searches))
 
 
 if __name__ == "__main__":

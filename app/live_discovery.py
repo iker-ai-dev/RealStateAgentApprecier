@@ -6,6 +6,7 @@ Only the existing search client is used. No URL fetching, retries, or cached lea
 from datetime import datetime, timezone
 import json
 import os
+import re
 
 from app.listing_discovery import normalize_listing_leads, safe_public_url
 from app.observability import start_agent_transaction, start_span
@@ -133,11 +134,15 @@ def research(query: str) -> list[dict]:
     key = os.getenv("NIMBLE_API_KEY")
     if not key or not key.strip():
         raise IntegrationError("Live discovery requires NIMBLE_API_KEY in the environment.")
-    queries = [query]
-    for suffix in (" open-air strip shopping center for sale vacancy broker listing",
-                   " retail market vacancy asking rents population household income report"):
-        if len(query) + len(suffix) <= 4000:
-            queries.append(query + suffix)
+    # In this retail workflow, "research centers in ..." is a command about
+    # shopping centers, not a search for laboratories. Preserve named markets
+    # such as Research Triangle and anchor the first (often only) search.
+    brief = re.sub(r'^research\s+cent(?:er|re)s\b', 'shopping centers', query,
+                   flags=re.IGNORECASE)
+    prefixes = ("open-air strip shopping centers for sale broker listings ",
+                "commercial retail market vacancy asking rents household income report ",
+                "retail shopping center redevelopment investment properties ")
+    queries = [prefix + brief[:4000 - len(prefix)] for prefix in prefixes]
     found = {}
     with start_agent_transaction("retailscope_ai.research"):
         with NimbleMCP(key, max_results=MAX_RESULTS, max_search_calls=MAX_SEARCHES) as client:
