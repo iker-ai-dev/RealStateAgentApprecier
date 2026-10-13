@@ -1,8 +1,61 @@
-# Integration review status
-
-This branch is a draft integration. See [INTEGRATION_STATUS.txt](INTEGRATION_STATUS.txt) for known limits and target-runtime checks. No investment return engine or completed appraisal is claimed. Cortex routes research topics; host code renders financial facts. Public sample records and legacy heuristics remain unverified. Upload all repository modules for Snowflake deployment.
-
 # RetailScope AI
+
+## Live Workspace
+
+The public application at https://retailscope-ai-demo.onrender.com is a React/TypeScript
+workspace backed by FastAPI, live Nimble discovery, Snowflake Cortex inference,
+and durable Snowflake workspace records. It does not fall back to sample data.
+The older Streamlit application below remains a separate deployment/reference.
+
+- **Chat:** choose a US city, purchase budget, and investment strategy, then send
+  the generated research prompt. Ask follow-up questions about the same evidence.
+- **Background agents:** save up to five searches per browser workspace. Pause,
+  resume, or run a search immediately. Results arrive in a durable lead inbox.
+- **Lead details:** the same source-backed metric view is used in chat and the
+  inbox. Price, area, cap rate, occupancy, NOI, asking rent, population, and median
+  household income are shown only when explicitly extractable. Missing,
+  ambiguous, or multi-property values stay unknown. These are source assertions,
+  not verified appraisals or guaranteed budget matches.
+
+Background searches are dispatched by `.github/workflows/scheduled-searches.yml`
+at 00:17, 06:17, 12:17, and 18:17 UTC. GitHub schedules may be delayed; this is not
+an exact-time SLA. The dispatcher wakes Render and drains up to 20 due searches,
+one at a time, without needing an open browser or an always-on Render worker.
+Only an authenticated internal request can dispatch work across owners. A durable
+conditional claim prevents the same scheduled slot being charged twice; an
+interrupted run is not automatically retried. Failed and partial runs remain visible.
+Pause stops future scheduled runs, not an already executing provider request.
+
+The workflow requires the GitHub Actions secret `RETAILSCOPE_SCHEDULER_SECRET`.
+The backend uses an explicit secret of that name when configured, otherwise a
+domain-separated HMAC-SHA256 of its persistent session signing key with the label
+`retailscope:background-dispatch:v1`. Only the derived dispatch credential belongs
+in GitHub; the session signing key must remain on the backend. Rotating the session
+key requires rotating the derived dispatch secret too. Never place either in Vite
+environment variables or source code. The dispatcher receives run status only,
+not private workspace data or provider credentials.
+
+Runs share the existing global daily allowance (default 120 research/chat calls),
+owner/IP limits, and bounded provider searches. Nimble usage is billed to the
+configured Nimble account; inference and storage are billed to Snowflake. A saved
+agent permits recurring provider usage until paused or its browser session expires
+(at most 30 days). Anonymous enrollment has a durable global cap of 20 unexpired
+subscriptions. The current identity is a
+signed browser session, not a cross-device account login: returning in the same
+browser restores the workspace while its session remains valid (30 days).
+Provision `SNOWFLAKE_AGENT_SLOTS_SQL` from `app/workspace_store.py` once in a
+serialized admin migration before enabling enrollment. Missing slots fail closed;
+the application does not grant itself DDL privileges or silently bypass the cap.
+
+Local live development: build `web` with `npm ci && npm run build`, then run
+`uvicorn app.web_api:create_app --factory --port 8766`. Use real provider settings
+for discovery/inference; SQLite is supported locally. Production requires Snowflake.
+The live MCP endpoint requires a workspace token created through `/landing`.
+
+## Legacy Streamlit Reference
+
+The following describes the original hackathon Streamlit build, not the live
+React workspace. See `INTEGRATION_STATUS.txt` for that build's limits.
 
 [User manual](https://retailscope-user-manual.starryharp64.chatgpt.site) covers deal discovery, center analysis, MCP installation, public research, Snowflake connections, deployment, Sentry, and troubleshooting. The Sites manual currently has owner-private access.
 

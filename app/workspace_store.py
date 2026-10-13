@@ -55,6 +55,16 @@ WHERE NOT EXISTS (
 )
 """
 
+# Serialized admin migration, like quota seeding. Twenty global enrollment slots
+# bound anonymous recurring work independently of disposable browser cookies.
+SNOWFLAKE_AGENT_SLOTS_SQL = """
+INSERT INTO RETAILSCOPE_WORKSPACE_RECORDS (record_type, owner, id, payload, updated_at)
+SELECT 'agent_slot', 'system', slot, OBJECT_CONSTRUCT('expires_at', '', 'agent_id', ''), CURRENT_TIMESTAMP()
+FROM (SELECT TO_VARCHAR(SEQ4()) AS slot FROM TABLE(GENERATOR(ROWCOUNT => 20))) slots
+WHERE NOT EXISTS (SELECT 1 FROM RETAILSCOPE_WORKSPACE_RECORDS r
+                  WHERE r.record_type='agent_slot' AND r.owner='system' AND r.id=slots.slot)
+"""
+
 
 def _utc_day() -> str:
     return datetime.now(timezone.utc).date().isoformat()
@@ -160,6 +170,33 @@ def _recovery_limit(limit: int) -> int:
 
 
 class _StoreInterface:
+    def list_agents(self, owner: str) -> list[dict]:
+        return self._read("agent", _identifier(owner, "Owner"))
+
+    def get_agent(self, owner: str, id: str) -> dict | None:
+        rows = self._read("agent", _identifier(owner, "Owner"), _identifier(id, "Agent ID"))
+        return rows[0] if rows else None
+
+    def save_agent(self, owner: str, agent: dict) -> None:
+        self._write("agent", _identifier(owner, "Owner"),
+                    [(_identifier(agent["id"], "Agent ID"), _encode(agent))])
+
+    def patch_agent(self, owner: str, id: str, changes: dict, expected: dict | None = None) -> bool:
+        allowed = {"enabled", "next_run_at", "last_run_at", "last_status", "last_job_id",
+                   "last_error", "lease_until", "run_id", "admission_after"}
+        if not changes or not set(changes) <= allowed or not set(expected or {}) <= allowed:
+            raise ValueError("Invalid agent update.")
+        _encode(changes)
+        return self._patch_agent(_identifier(owner, "Owner"), _identifier(id, "Agent ID"),
+                                 changes, expected or {})
+
+    def list_read_receipts(self, owner: str) -> list[dict]:
+        return self._read("receipt", _identifier(owner, "Owner"))
+
+    def mark_lead_read(self, owner: str, id: str) -> None:
+        self._write("receipt", _identifier(owner, "Owner"),
+                    [(_identifier(id, "Lead ID"), _encode({"id": id, "read_at": _now()}))])
+
     def list_leads(self, owner: str) -> list[dict]:
         return self._read("lead", _identifier(owner, "Owner"))
 
@@ -270,6 +307,11 @@ class WorkspaceStore(_StoreInterface):
                 );
                 CREATE INDEX IF NOT EXISTS messages_owner_conversation
                     ON messages(owner, conversation_id, sequence);
+                CREATE TABLE IF NOT EXISTS workspace_records (
+                    kind TEXT NOT NULL, owner TEXT NOT NULL, id TEXT NOT NULL,
+                    payload TEXT NOT NULL, updated_at TEXT NOT NULL,
+                    PRIMARY KEY (kind, owner, id)
+                );
             """)
             # Seed only when creating the quota table; a missing existing row stays closed.
             connection.execute("BEGIN IMMEDIATE")
@@ -285,9 +327,40 @@ class WorkspaceStore(_StoreInterface):
                 """)
                 connection.execute("INSERT INTO daily_usage(id, date, count) VALUES (?, ?, ?)",
                                    ("daily", _utc_day(), 0))
+            slots_exist = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='agent_slots'").fetchone()
+            if slots_exist is None:
+                connection.execute("CREATE TABLE agent_slots (id INTEGER PRIMARY KEY, expires_at TEXT NOT NULL, agent_id TEXT NOT NULL)")
+                connection.executemany("INSERT INTO agent_slots VALUES (?, '', '')", [(i,) for i in range(20)])
 
     def _connect(self):
         return sqlite3.connect(str(self.path), timeout=30)
+
+    def reserve_agent_slot(self, agent_id: str, expires_at: str) -> bool:
+        with closing(self._connect()) as connection, connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute("SELECT id FROM agent_slots WHERE expires_at<=? ORDER BY id LIMIT 1",
+                                     (_now(),)).fetchone()
+            if row is None:
+                return False
+            connection.execute("UPDATE agent_slots SET expires_at=?, agent_id=? WHERE id=?",
+                               (expires_at, agent_id, row[0]))
+            return True
+
+    def enroll_agent(self, owner: str, agent: dict) -> bool:
+        owner = _identifier(owner, "Owner")
+        with closing(self._connect()) as connection, connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute("SELECT id FROM agent_slots WHERE expires_at<=? ORDER BY id LIMIT 1",
+                                     (_now(),)).fetchone()
+            if row is None:
+                return False
+            connection.execute("UPDATE agent_slots SET expires_at=?, agent_id=? WHERE id=?",
+                               (agent["expires_at"], agent["id"], row[0]))
+            connection.execute("INSERT INTO workspace_records(kind, owner, id, payload, updated_at) "
+                               "VALUES ('agent', ?, ?, ?, ?)",
+                               (owner, agent["id"], _encode(agent), _now()))
+        return True
 
     def reserve_daily_usage(self, limit: int) -> bool:
         """Reserve one paid run globally for this UTC day; never refund failures.
@@ -322,7 +395,12 @@ class WorkspaceStore(_StoreInterface):
     def _write(self, kind: str, owner: str, records: list[tuple[str, str]]) -> None:
         with closing(self._connect()) as connection, connection:
             stamp = _now()
-            if kind == "message":
+            if kind in {"agent", "receipt"}:
+                connection.executemany(
+                    "INSERT INTO workspace_records(kind, owner, id, payload, updated_at) VALUES (?, ?, ?, ?, ?) "
+                    "ON CONFLICT(kind, owner, id) DO UPDATE SET payload=excluded.payload, updated_at=excluded.updated_at",
+                    [(kind, owner, id, payload, stamp) for id, payload in records])
+            elif kind == "message":
                 connection.executemany(
                     "INSERT INTO messages(owner, id, conversation_id, payload, updated_at) VALUES (?, ?, ?, ?, ?)",
                     [(owner, id, _decode(payload)["conversation_id"], payload, stamp)
@@ -341,6 +419,16 @@ class WorkspaceStore(_StoreInterface):
 
     def _read(self, kind: str, owner: str, id: str | None = None,
               conversation_id: str | None = None) -> list[dict]:
+        if kind in {"agent", "receipt"}:
+            sql = "SELECT payload FROM workspace_records WHERE kind=? AND owner=?"
+            params = [kind, owner]
+            if id is not None:
+                sql += " AND id=?"
+                params.append(id)
+            sql += " ORDER BY updated_at DESC LIMIT ?"
+            params.append(MAX_READ_RECORDS)
+            with closing(self._connect()) as connection:
+                return [_decode(row[0]) for row in connection.execute(sql, params).fetchall()]
         sql, params = {
             "lead": ("SELECT payload FROM leads WHERE owner=? ORDER BY updated_at, id LIMIT ?",
                      (owner, MAX_READ_RECORDS + 1)),
@@ -353,6 +441,35 @@ class WorkspaceStore(_StoreInterface):
         if len(rows) > MAX_READ_RECORDS:
             raise ValueError("Workspace read exceeds the record limit.")
         return [_job(row[0], row[1]) if kind == "job" else _decode(row[0]) for row in rows]
+
+    def due_agents(self, now: str, limit: int = 20) -> list[dict]:
+        with closing(self._connect()) as connection:
+            rows = connection.execute(
+                "SELECT owner, payload FROM workspace_records WHERE kind='agent' "
+                "AND json_extract(payload, '$.enabled')=1 "
+                "AND json_extract(payload, '$.next_run_at')<=? "
+                "AND json_extract(payload, '$.expires_at')>? "
+                "AND COALESCE(json_extract(payload, '$.lease_until'), '')<=? "
+                "AND COALESCE(json_extract(payload, '$.admission_after'), '')<=? "
+                "ORDER BY json_extract(payload, '$.next_run_at'), id LIMIT ?",
+                (now, now, now, now, _recovery_limit(limit))).fetchall()
+        return [{"owner": row[0], "agent": _decode(row[1])} for row in rows]
+
+    def _patch_agent(self, owner: str, id: str, changes: dict, expected: dict) -> bool:
+        with closing(self._connect()) as connection, connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute("SELECT payload FROM workspace_records "
+                                     "WHERE kind='agent' AND owner=? AND id=?", (owner, id)).fetchone()
+            if row is None:
+                return False
+            payload = _decode(row[0])
+            if any(payload.get(key) != value for key, value in expected.items()):
+                return False
+            payload.update(changes)
+            connection.execute("UPDATE workspace_records SET payload=?, updated_at=? "
+                               "WHERE kind='agent' AND owner=? AND id=?",
+                               (_encode(payload), _now(), owner, id))
+            return True
 
     def list_conversations(self, owner: str) -> list[dict]:
         """Latest 100 owned conversations, previewed by their first user message."""
@@ -473,6 +590,50 @@ class SnowflakeWorkspaceStore(_StoreInterface):
             )
         return len(result) == 1 and type(result[0][0]) is int and result[0][0] == 1
 
+    def reserve_agent_slot(self, agent_id: str, expires_at: str) -> bool:
+        with self._session() as session:
+            return self._reserve_agent_slot(session, agent_id, expires_at)
+
+    def _reserve_agent_slot(self, session, agent_id: str, expires_at: str) -> bool:
+        now = _now()
+        rows = session.sql("SELECT id FROM RETAILSCOPE_WORKSPACE_RECORDS "
+                "WHERE record_type='agent_slot' AND owner='system' AND payload:expires_at::STRING<=? "
+                "ORDER BY id LIMIT 20", params=[now]).collect(
+                    statement_params={"STATEMENT_TIMEOUT_IN_SECONDS": "30"}, log_on_exception=False)
+        for row in rows:
+            slot = row[0]
+            result = session.sql("UPDATE RETAILSCOPE_WORKSPACE_RECORDS "
+                    "SET payload=OBJECT_CONSTRUCT('expires_at', ?, 'agent_id', ?), updated_at=CURRENT_TIMESTAMP() "
+                    "WHERE record_type='agent_slot' AND owner='system' AND id=? "
+                    "AND payload:expires_at::STRING<=? "
+                    "AND (SELECT COUNT(*) FROM RETAILSCOPE_WORKSPACE_RECORDS "
+                    "WHERE record_type='agent_slot' AND owner='system' AND id=?)=1",
+                    params=[expires_at, agent_id, slot, now, slot]).collect(
+                        statement_params={"STATEMENT_TIMEOUT_IN_SECONDS": "30"}, log_on_exception=False)
+            if len(result) == 1 and result[0][0] == 1:
+                return True
+        return False
+
+    def enroll_agent(self, owner: str, agent: dict) -> bool:
+        owner = _identifier(owner, "Owner")
+        with self._session() as session:
+            def sql(statement, params=None):
+                return session.sql(statement, params=params).collect(
+                    statement_params={"STATEMENT_TIMEOUT_IN_SECONDS": "30"}, log_on_exception=False)
+            sql("BEGIN")
+            try:
+                if not self._reserve_agent_slot(session, agent["id"], agent["expires_at"]):
+                    sql("ROLLBACK")
+                    return False
+                sql("INSERT INTO RETAILSCOPE_WORKSPACE_RECORDS(record_type, owner, id, payload, updated_at) "
+                    "SELECT 'agent', ?, ?, PARSE_JSON(?), CURRENT_TIMESTAMP()",
+                    [owner, agent["id"], _encode(agent)])
+                sql("COMMIT")
+            except Exception:
+                sql("ROLLBACK")
+                raise
+        return True
+
     def _write(self, kind: str, owner: str, records: list[tuple[str, str]]) -> None:
         if not records:
             return
@@ -490,6 +651,39 @@ class SnowflakeWorkspaceStore(_StoreInterface):
                 """, params=[kind, owner, id, payload]).collect(
                     statement_params={"STATEMENT_TIMEOUT_IN_SECONDS": "30"}, log_on_exception=False,
                 )
+
+    def due_agents(self, now: str, limit: int = 20) -> list[dict]:
+        with self._session() as session:
+            rows = session.sql(
+                "SELECT owner, payload FROM RETAILSCOPE_WORKSPACE_RECORDS WHERE record_type='agent' "
+                "AND payload:enabled::BOOLEAN=TRUE AND payload:next_run_at::STRING<=? "
+                "AND payload:expires_at::STRING>? "
+                "AND COALESCE(AS_VARCHAR(payload:lease_until), '')<=? "
+                "AND COALESCE(AS_VARCHAR(payload:admission_after), '')<=? "
+                "ORDER BY payload:next_run_at::STRING, id LIMIT ?",
+                params=[now, now, now, now, _recovery_limit(limit)]).collect(
+                    statement_params={"STATEMENT_TIMEOUT_IN_SECONDS": "30"}, log_on_exception=False)
+        return [{"owner": row[0], "agent": _decode(row[1])} for row in rows]
+
+    def _patch_agent(self, owner: str, id: str, changes: dict, expected: dict) -> bool:
+        expression, params = "payload", []
+        for key, value in changes.items():
+            expression = f"OBJECT_INSERT({expression}, '{key}', PARSE_JSON(?), TRUE)"
+            params.append(_encode(value))
+        sql = ("UPDATE RETAILSCOPE_WORKSPACE_RECORDS SET payload=" + expression +
+               ", updated_at=CURRENT_TIMESTAMP() WHERE record_type='agent' AND owner=? AND id=?")
+        params.extend([owner, id])
+        for key, value in expected.items():
+            sql += f" AND EQUAL_NULL(payload:{key}, PARSE_JSON(?))"
+            params.append(_encode(value))
+        # Fail closed if externally inserted duplicates violate informational keys.
+        sql += (" AND (SELECT COUNT(*) FROM RETAILSCOPE_WORKSPACE_RECORDS "
+                "WHERE record_type='agent' AND owner=? AND id=?)=1")
+        params.extend([owner, id])
+        with self._session() as session:
+            rows = session.sql(sql, params=params).collect(
+                statement_params={"STATEMENT_TIMEOUT_IN_SECONDS": "30"}, log_on_exception=False)
+        return len(rows) == 1 and rows[0][0] == 1
 
     def _read(self, kind: str, owner: str, id: str | None = None,
               conversation_id: str | None = None) -> list[dict]:

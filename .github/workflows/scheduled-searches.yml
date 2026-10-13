@@ -1,0 +1,28 @@
+name: Background lead searches
+
+on:
+  schedule:
+    - cron: '17 */6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: retailscope-background-searches
+  cancel-in-progress: false
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Run due searches
+        env:
+          APP_URL: https://retailscope-ai-demo.onrender.com
+          RETAILSCOPE_SCHEDULER_SECRET: ${{ secrets.RETAILSCOPE_SCHEDULER_SECRET }}
+        run: python scripts/run_scheduled_searches.py

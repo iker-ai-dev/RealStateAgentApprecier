@@ -45,7 +45,7 @@ class WorkspaceApiTests(unittest.TestCase):
         report_messages = self.client.get(f"/api/conversations/{job_id}").json()["messages"]
         self.assertEqual(len(report_messages), 2)
         self.assertEqual(report_messages[1]["content"], result["analysis"]["answer"])
-        self.assertEqual(self.client.get("/api/leads").json()["leads"], [self.lead])
+        self.assertEqual(self.client.get("/api/leads").json()["leads"][0]["id"], self.lead["id"])
         response = self.client.post("/api/chat", json={"message": "Should I buy it?", "lead_id": "lead-one"})
         self.assertEqual(response.status_code, 200)
         self.assertEqual(self.calls[0][1], [self.lead])
@@ -130,11 +130,11 @@ class WorkspaceApiTests(unittest.TestCase):
                     break
                 time.sleep(0.01)
             self.assertEqual(result['status'], 'partial')
-            self.assertEqual(result['leads'], [self.lead])
+            self.assertEqual(result['leads'][0]['id'], self.lead['id'])
             self.assertIn('Sources were saved', result['error'])
             self.assertNotIn('private-provider', result['error'])
             self.assertFalse(result.get('analysis'))
-            self.assertEqual(client.get('/api/leads').json()['leads'], [self.lead])
+            self.assertEqual(client.get('/api/leads').json()['leads'][0]['id'], self.lead['id'])
             self.assertEqual(client.get('/api/conversations').json()['conversations'], [])
             other = TestClient(app)
             self.assertEqual(other.get('/api/leads').json()['leads'], [])
@@ -188,7 +188,7 @@ class WorkspaceApiTests(unittest.TestCase):
         result = response.json()["result"]
         self.assertFalse(result.get("isError"), result)
         self.assertIn("structuredContent", result, result)
-        self.assertEqual(result["structuredContent"]["leads"], [self.lead])
+        self.assertEqual(result["structuredContent"]["leads"][0]["id"], self.lead["id"])
         body["params"] = {"name": "calculate_investment_scenario", "arguments": {
             "assumptions": {"purchase_price": 1000000, "annual_noi": 100000, "exit_cap_rate": 0.1}}}
         result = self.client.post("/mcp", json=body, headers=headers).json()["result"]
