@@ -7,6 +7,8 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 import os
+import inspect
+import json
 from pathlib import Path
 import re
 import secrets
@@ -15,7 +17,7 @@ import time
 from urllib.parse import urlsplit
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 from starlette.routing import Route
@@ -29,6 +31,28 @@ from app.observability import capture_exception, init_sentry
 from app.underwriting import Scenario, calculate_scenario
 from app.workspace_tokens import (browser_signing_key, issue_browser_session,
                                   issue_token, verify_browser_session, verify_token, SESSION_LIFETIME)
+
+
+RESEARCH_STREAM_SECONDS = 300
+RESEARCH_POLL_SECONDS = 2
+RESEARCH_HEARTBEAT_SECONDS = 10
+RESEARCH_STREAM_LIMIT = 32
+RESEARCH_OWNER_STREAM_LIMIT = 4
+
+
+class _ResearchStream(StreamingResponse):
+    """Release admission even if transport closes before iteration starts."""
+
+    def __init__(self, content, release):
+        super().__init__(content, media_type="text/event-stream",
+                         headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
+        self.release = release
+
+    async def __call__(self, scope, receive, send):
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            self.release()
 
 
 class ResearchRequest(BaseModel):
@@ -123,6 +147,8 @@ def create_app(*, store=None, research_fn=None, analyze_fn=None):
     gate = UsageGate(store.reserve_daily_usage)
     session_key = browser_signing_key()
     agent_config_lock = threading.Lock()
+    stream_lock = threading.Lock()
+    streams = defaultdict(int)
 
     @asynccontextmanager
     async def lifespan(app):
@@ -221,7 +247,9 @@ def create_app(*, store=None, research_fn=None, analyze_fn=None):
     def run_research(owner, job_id, query, agent_id=None):
         deadline = time.monotonic() + 300
         try:
-            store.update_job(owner, job_id, "running", expected_status="queued")
+            if not store.update_job(owner, job_id, "running", expected_status="queued",
+                                    stage="searching", started_at=datetime.now(timezone.utc).isoformat()):
+                return
             found = research_fn(query)
             if agent_id:
                 found = [dict(lead, agent_id=agent_id, job_id=job_id) for lead in found]
@@ -236,13 +264,26 @@ def create_app(*, store=None, research_fn=None, analyze_fn=None):
                 store.upsert_leads(owner, found)
                 store.update_job(owner, job_id, "running", leads=found, expected_status="running")
                 try:
+                    def on_progress(stage):
+                        if stage in {"analyzing", "validating", "repairing"}:
+                            store.update_job(owner, job_id, "running", stage=stage,
+                                             expected_status="running")
+
+                    kwargs = {"history": None}
+                    # Explicit opt-in keeps legacy injected analyzers unchanged.
+                    try:
+                        parameters = inspect.signature(analyze_fn).parameters
+                    except (TypeError, ValueError):
+                        parameters = {}
+                    if "on_progress" in parameters:
+                        kwargs["on_progress"] = on_progress
                     report = analyze_fn("Analyze these leads for this acquisition search: " + query,
-                                        found, history=None)
+                                        found, **kwargs)
                     if time.monotonic() >= deadline:
                         raise TimeoutError("Research exceeded its execution deadline.")
                 except Exception as exc:
                     capture_exception(exc)
-                    store.update_job(owner, job_id, "partial", leads=found,
+                    store.update_job(owner, job_id, "partial", leads=found, stage="partial",
                                      error="Sources were saved, but the AI analysis could not be verified. "
                                            "You can inspect the sources or ask a follow-up question.",
                                      expected_status="running")
@@ -253,17 +294,17 @@ def create_app(*, store=None, research_fn=None, analyze_fn=None):
                 store.append_message(owner, job_id, "user", query)
                 store.append_message(owner, job_id, "assistant", report["answer"],
                                      metadata={key: report[key] for key in ("sources", "model", "usage") if key in report})
-                store.update_job(owner, job_id, "completed", leads=found, analysis=report,
+                store.update_job(owner, job_id, "completed", leads=found, analysis=report, stage="completed",
                                  expected_status="running")
             else:
-                store.update_job(owner, job_id, "completed", leads=[], expected_status="running")
+                store.update_job(owner, job_id, "completed", leads=[], stage="completed", expected_status="running")
         except Exception as exc:
             capture_exception(exc)
             error = "Live research could not finish. Please retry or check provider access."
             if isinstance(exc, LiveAgentError):
                 # LiveAgentError contains only host-authored validation reasons.
                 error = str(exc)
-            store.update_job(owner, job_id, "failed", expected_status="running",
+            store.update_job(owner, job_id, "failed", expected_status="running", stage="failed",
                              error=error)
         finally:
             gate.release(owner, "research")
@@ -398,23 +439,86 @@ def create_app(*, store=None, research_fn=None, analyze_fn=None):
         result = store.get_job(owner, job["id"])
         return {"ran": True, "status": result["status"]}
 
-    @app.get("/api/research/{job_id}")
-    def research_status(job_id: str, request: Request):
+    def research_snapshot(owner, job_id):
         from app.lead_facts import enrich_leads
         if not re.fullmatch(r"[a-f0-9]{32}", job_id):
             raise HTTPException(404, "Research run not found.")
-        job = store.get_job(request.state.owner, job_id)
+        job = store.get_job(owner, job_id)
         if job is None:
             raise HTTPException(404, "Research run not found.")
         if job["status"] in {"queued", "running"}:
             started = datetime.fromisoformat(job["created_at"])
             if ((datetime.now(timezone.utc) - started).total_seconds() > 600
-                    and not gate.is_active(request.state.owner, "research")):
-                store.update_job(request.state.owner, job_id, "failed",
+                    and not gate.is_active(owner, "research")):
+                store.update_job(owner, job_id, "failed", stage="failed",
                                  error="Research was interrupted or exceeded its deadline. Submit a new run to retry.",
                                  expected_status=job["status"])
-                job = store.get_job(request.state.owner, job_id)
+                job = store.get_job(owner, job_id)
         return {**job, "leads": enrich_leads(job.get("leads", []))}
+
+    @app.get("/api/research/{job_id}")
+    def research_status(job_id: str, request: Request):
+        return research_snapshot(request.state.owner, job_id)
+
+    @app.get("/api/research/{job_id}/events")
+    async def research_events(job_id: str, request: Request):
+        owner = request.state.owner
+        with stream_lock:
+            if (sum(streams.values()) >= RESEARCH_STREAM_LIMIT
+                    or streams.get(owner, 0) >= RESEARCH_OWNER_STREAM_LIMIT):
+                raise HTTPException(429, "Too many research streams. Use status polling.")
+            streams[owner] += 1
+
+        def release():
+            with stream_lock:
+                streams[owner] -= 1
+                if not streams[owner]:
+                    del streams[owner]
+
+        deadline = time.monotonic() + RESEARCH_STREAM_SECONDS
+        try:
+            # Authenticate ownership before sending streaming response headers.
+            initial = await asyncio.wait_for(
+                asyncio.to_thread(research_snapshot, owner, job_id), RESEARCH_STREAM_SECONDS)
+        except BaseException:
+            release()
+            raise
+
+        async def events():
+            snapshot = initial
+            previous = None
+            try:
+                async with asyncio.timeout(max(0, deadline - time.monotonic())):
+                    while True:
+                        if await request.is_disconnected():
+                            return
+                        data = json.dumps(snapshot, ensure_ascii=True, separators=(",", ":"))
+                        if data != previous:
+                            yield "event: progress\ndata: " + data + "\n\n"
+                            previous = data
+                        else:
+                            yield "event: heartbeat\ndata: {}\n\n"
+                        if snapshot["status"] in {"completed", "partial", "failed"}:
+                            return
+                        await asyncio.sleep(RESEARCH_POLL_SECONDS)
+                        pending = asyncio.create_task(asyncio.to_thread(research_snapshot, owner, job_id))
+                        try:
+                            # A slow durable read must not trip the client's idle timer.
+                            while not pending.done():
+                                done, _ = await asyncio.wait({pending}, timeout=RESEARCH_HEARTBEAT_SECONDS)
+                                if not done:
+                                    yield "event: heartbeat\ndata: {}\n\n"
+                            snapshot = await pending
+                        finally:
+                            pending.cancel()
+            except TimeoutError:
+                return
+            except Exception as exc:
+                capture_exception(exc)
+                # Closing the transport lets clients fall back to status polling.
+                return
+
+        return _ResearchStream(events(), release)
 
     @app.get("/api/conversations")
     def conversations(request: Request):

@@ -31,7 +31,7 @@ MAX_READ_RECORDS = 1000
 MAX_TEXT_BYTES = 65_536
 MAX_CONVERSATIONS = 100
 MAX_CONVERSATION_PREVIEW = 100
-JOB_PATCH_FIELDS = ("status", "leads", "error", "analysis")
+JOB_PATCH_FIELDS = ("status", "leads", "error", "analysis", "stage", "started_at")
 MESSAGE_METADATA_FIELDS = ("sources", "model", "usage")
 
 SNOWFLAKE_SCHEMA_SQL = """
@@ -217,7 +217,8 @@ class _StoreInterface:
 
     def update_job(self, owner: str, id: str, status: str,
                    leads: list[dict] | None = None, error: str | None = None,
-                   analysis: dict | None = None, expected_status: str | None = None) -> bool:
+                   analysis: dict | None = None, expected_status: str | None = None,
+                   *, stage: str | None = None, started_at: str | None = None) -> bool:
         """Patch an existing owned job; unknown/foreign IDs are an inert no-op.
 
         Omitted leads/error/analysis preserve previous fields. Analysis reports
@@ -232,6 +233,12 @@ class _StoreInterface:
         if expected_status is not None:
             expected_status = _identifier(expected_status, "Expected job status")
         changes = {"status": _identifier(status, "Job status")}
+        if stage is not None:
+            if stage not in {"searching", "analyzing", "validating", "repairing", "completed", "partial", "failed"}:
+                raise ValueError("Invalid research stage.")
+            changes["stage"] = stage
+        if started_at is not None:
+            changes["started_at"] = _timestamp(started_at)
         if leads is not None:
             changes["leads"] = [_decode(payload) for _, payload in _leads(leads)]
         if error is not None:

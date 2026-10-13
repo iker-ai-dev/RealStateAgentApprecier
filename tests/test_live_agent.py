@@ -25,6 +25,37 @@ def analysis():
 
 
 class LiveAgentTests(unittest.TestCase):
+    def test_saved_job_rounding_failure_has_targeted_private_repair_feedback(self):
+        leads = copy.deepcopy(LEADS)
+        leads[0]['summary'] = 'Historical source-reported sale: $2,985,000, 5.72% cap rate; another sale 9.39%.'
+        rejected = analysis()
+        rejected['paragraphs'] = [{'kind': 'analysis', 'text': 'Reported sales ranged from 5.7% to 9.4%.',
+            'source_ids': ['lead-a'], 'quotes': [{'source_id': 'lead-a', 'quote': 'lead-a:q0'}], 'metric_refs': []}]
+        repaired = copy.deepcopy(rejected)
+        repaired['paragraphs'][0]['text'] = 'Historical source-reported and unverified cap rates: 5.72% and 9.39%.'
+        self.provider.complete.side_effect = [agent.Completion(rejected, {}, agent.DEFAULT_MODEL),
+                                             agent.Completion(repaired, {}, agent.DEFAULT_MODEL)]
+        stages = []
+        with patch.object(agent, 'CortexProvider', return_value=self.provider):
+            result = agent.analyze('Analyze', leads, on_progress=stages.append)
+        self.assertIn('5.72%', result['answer'])
+        self.assertEqual(stages, ['analyzing', 'validating', 'repairing', 'validating'])
+        repair_prompt = self.provider.complete.call_args.args[0]
+        self.assertIn('Unsupported numeric tokens in this paragraph: ["5.7%", "9.4%"]', repair_prompt)
+        self.provider.complete.side_effect = None
+        self.provider.complete.return_value = agent.Completion(rejected, {}, agent.DEFAULT_MODEL)
+        with self.assertRaises(agent.LiveAgentError) as caught:
+            self.run_analysis(leads=leads)
+        self.assertNotIn('9.4%', str(caught.exception))
+
+    def test_progress_failure_cannot_retry_paid_analysis(self):
+        callback = Mock(side_effect=RuntimeError(CANARY))
+        with patch.object(agent, 'CortexProvider', return_value=self.provider):
+            result = agent.analyze('Analyze', LEADS, on_progress=callback)
+        self.assertTrue(result['answer'])
+        self.provider.complete.assert_called_once()
+        self.assertEqual([call.args[0] for call in callback.call_args_list], ['analyzing', 'validating'])
+
     def test_unused_legacy_limitations_cannot_reject_or_leak_into_answer(self):
         response = analysis()
         response['limitations'] = 'Unverified 123456789% return [99] https://untrusted.invalid'

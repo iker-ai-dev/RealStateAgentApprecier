@@ -10,6 +10,8 @@ import App from "./App";
 import { api, type Agent, type Lead } from "./api";
 import { Markdown } from "./Markdown";
 import { LeadDetails } from "./LeadDetails";
+import * as researchStreams from "./researchStream";
+import type { ResearchResult } from "./api";
 
 beforeEach(() => {
   window.history.replaceState({}, "", "/");
@@ -41,6 +43,53 @@ const savedAgent: Agent = {
 };
 
 describe("search and background workspace", () => {
+  it("shows early sources and progress without attributing an older answer to a new search", async () => {
+    window.history.replaceState({}, "", "/?conversation=old");
+    vi.spyOn(api, "conversation").mockResolvedValue({
+      id: "old",
+      messages: [{ role: "assistant", content: "Previous search answer" }],
+    });
+    vi.spyOn(api, "research").mockResolvedValue({
+      id: "new",
+      status: "queued",
+    });
+    let update!: (result: ResearchResult) => void;
+    let finish!: (result: ResearchResult) => void;
+    vi.spyOn(researchStreams, "streamResearch").mockImplementation(
+      (_id, _signal, onUpdate) => {
+        update = onUpdate;
+        return new Promise((resolve) => {
+          finish = resolve;
+        });
+      },
+    );
+    render(<App />);
+    await screen.findByText("Previous search answer");
+    fireEvent.click(screen.getByRole("button", { name: "Send prompt" }));
+    await waitFor(() => expect(update).toBeDefined());
+    expect(
+      screen.queryByText("Previous search answer"),
+    ).not.toBeInTheDocument();
+    const leads = [
+      { id: "early", title: "Early source", url: "https://example.org" },
+    ];
+    update({ id: "new", status: "running", stage: "analyzing", leads });
+    await screen.findByRole("button", { name: /Early source/ });
+    expect(
+      screen.getAllByText("Analyzing retrieved evidence").length,
+    ).toBeGreaterThan(0);
+    expect(screen.getByText(/1 sources retrieved/)).toBeInTheDocument();
+    finish({
+      id: "new",
+      status: "partial",
+      leads,
+      error: "Analysis needs attention",
+    });
+    await screen.findByText("Analysis needs attention");
+    expect(
+      screen.queryByText("Previous search answer"),
+    ).not.toBeInTheDocument();
+  });
   it("keeps saved leads visible while refreshing the list", async () => {
     vi.spyOn(api, "leads")
       .mockResolvedValueOnce({
@@ -513,7 +562,7 @@ it("shows unknown facts without zero substitution and blocks unsafe evidence URL
     },
   };
   const { container } = render(<LeadDetails lead={lead} />);
-  expect(screen.getAllByText("Unknown")).toHaveLength(6);
+  expect(screen.getAllByText("Not provided")).toHaveLength(6);
   expect(screen.getByLabelText("Source-reported occupancy")).toHaveAttribute(
     "value",
     "0",
@@ -649,7 +698,8 @@ describe("workspace", () => {
     expect(
       screen.queryByRole("button", { name: "Cancel" }),
     ).not.toBeInTheDocument();
-    expect(screen.queryAllByRole("article")).toHaveLength(0);
+    expect(screen.queryAllByRole("article")).toHaveLength(1);
+    expect(screen.getByRole("article")).toHaveTextContent("Phoenix properties");
     expect(chat).not.toHaveBeenCalled();
     expect(result).toHaveBeenCalledOnce();
     fireEvent.click(screen.getByRole("button", { name: /Saved source/ }));

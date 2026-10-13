@@ -4,7 +4,7 @@ import os
 import unittest
 from unittest.mock import patch
 
-from app.live_discovery import MAX_EXCERPTS, MAX_TEXT, normalize_evidence, research
+from app.live_discovery import MAX_EXCERPTS, MAX_TEXT, _search_brief, normalize_evidence, research
 from nimble_mcp import IntegrationError, MCP_URL
 
 STAMP = "2026-10-12T12:00:00+00:00"
@@ -129,6 +129,41 @@ class EvidenceTests(unittest.TestCase):
 
 
 class ResearchTests(unittest.TestCase):
+    def test_verbose_acquisition_request_keeps_market_types_and_budget(self):
+        query = ('Research for me open-air shopping centers and strip centers for sale in '
+                 'Phoenix, AZ, United States, with an asking price between $1 million and $10 million. '
+                 'Focus on value-add opportunities. Find original property listings and report asking '
+                 'price, area, occupancy, cap rate, annual NOI, tenant rents, population and median '
+                 'household income when sources provide them. Include source links and distinguish '
+                 'source-reported facts from unknowns. Do not assume a property fits the budget.')
+        brief = _search_brief(query)
+        self.assertEqual(brief, 'Phoenix, AZ, United States open-air shopping centers strip centers '
+                         '$1 million $10 million value-add')
+        session = FixtureSession([{'content': [], 'structuredContent': {'results': []}}] * 3)
+        with patch.dict(os.environ, {'NIMBLE_API_KEY': 'synthetic'}, clear=True), \
+                patch('nimble_mcp.requests.Session', return_value=session):
+            research(query)
+        queries = [call['params']['arguments']['query'] for call, _ in session.calls
+                   if call['method'] == 'tools/call']
+        self.assertEqual(len(queries), 3)
+        for query in queries:
+            self.assertLess(len(query), 200)
+            self.assertIn(brief, query)
+            self.assertNotIn('report asking', query)
+
+    def test_criteria_at_end_of_long_request_are_not_truncated(self):
+        query = ('Please inspect the evidence carefully. ' * 60 +
+                 'Find strip centers in Phoenix, AZ with asking prices from $1,000,000 to $10,000,000.')
+        self.assertEqual(_search_brief(query), 'Phoenix, AZ strip centers $1,000,000 $10,000,000')
+        with self.assertRaisesRegex(IntegrationError, 'concise'):
+            _search_brief('Unstructured instructions ' * 100)
+
+    def test_compact_price_range_and_named_market_are_preserved(self):
+        self.assertEqual(_search_brief('Find strip centers in Phoenix under $1-10M.'),
+                         'Phoenix strip centers $1-10M')
+        self.assertEqual(_search_brief('Research strip centers in Research Triangle with budget $1M-$10M.'),
+                         'Research Triangle strip centers $1M-$10M')
+
     def test_missing_key_and_invalid_query_make_no_requests(self):
         with patch.dict(os.environ, {}, clear=True), patch("nimble_mcp.requests.Session") as session:
             with self.assertRaisesRegex(IntegrationError, "NIMBLE_API_KEY"):
@@ -172,7 +207,7 @@ class ResearchTests(unittest.TestCase):
     def test_first_search_resolves_retail_intent_without_changing_market_names(self):
         for brief, expected in (
                 ('Research centers in Phoenix with redevelopment potential',
-                 'shopping centers in Phoenix with redevelopment potential'),
+                 'Phoenix shopping centers redevelopment'),
                 ('Research Triangle shopping centers', 'Research Triangle shopping centers')):
             with self.subTest(brief=brief):
                 records = [dict(RECORD, url=f'https://broker.example/{i}') for i in range(10)]
@@ -213,14 +248,14 @@ class ResearchTests(unittest.TestCase):
         self.assertEqual(len(rows[0]["search_queries"]), 3)
         self.assertTrue(rows[0]["last_retrieved_at"])
 
-    def test_maximum_query_length_still_uses_valid_bounded_search(self):
+    def test_unstructured_maximum_query_fails_instead_of_silently_truncating(self):
         session = FixtureSession([{"content": [], "structuredContent": {"results": []}} for _ in range(3)])
         with patch.dict(os.environ, {"NIMBLE_API_KEY": "synthetic"}, clear=True), \
                 patch("nimble_mcp.requests.Session", return_value=session):
-            self.assertEqual(research("x" * 4000), [])
+            with self.assertRaisesRegex(IntegrationError, 'concise'):
+                research("x" * 4000)
         searches = [call for call, _ in session.calls if call['method'] == 'tools/call']
-        self.assertEqual(len(searches), 3)
-        self.assertTrue(all(len(call['params']['arguments']['query']) <= 4000 for call in searches))
+        self.assertEqual(searches, [])
 
 
 if __name__ == "__main__":

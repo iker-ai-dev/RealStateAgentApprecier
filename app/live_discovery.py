@@ -122,6 +122,39 @@ def normalize_evidence(response, *, query, retrieved_at):
     return list(leads.values())
 
 
+def _search_brief(query: str) -> str:
+    """Separate acquisition criteria from answer instructions without truncation."""
+    query = source_query(query)
+    query = re.sub(r'^research\s+(?:for\s+me\s+)?cent(?:er|re)s\b',
+                   'shopping centers', query, flags=re.IGNORECASE)
+    market = re.search(
+        r'\bin\s+([A-Za-z][A-Za-z ,\'-]*?)(?=\s+(?:with|within|under|between|from|for)\b|[.!?;]|$)',
+        query, re.IGNORECASE)
+    types = re.findall(r'\b(?:open-air shopping centers?|shopping centres?|shopping centers?|'
+                       r'strip centers?|retail properties|retail centers?|mixed-use|freestanding retail)\b',
+                       query, re.IGNORECASE)
+    amount = r'\d[\d,]*(?:\.\d+)?(?:\s*(?:million|billion|[mkb])\b)?'
+    money = re.findall(r'\$\s*' + amount + r'(?:\s*[-\u2013]\s*\$?\s*' + amount + r')?',
+                       query, re.IGNORECASE)
+    if market and types:
+        parts = [market.group(1).strip(' ,'), *dict.fromkeys(t.lower() for t in types)]
+        if money:
+            parts.append(' '.join(dict.fromkeys(money)))
+        if re.search(r'\bvalue[- ]add\b', query, re.IGNORECASE):
+            parts.append('value-add')
+        elif re.search(r'\bredevelopment\b', query, re.IGNORECASE):
+            parts.append('redevelopment')
+        brief = ' '.join(parts)
+    else:
+        brief = re.split(r'\s+(?:Find original|Include source|Identify missing|Do not assume|'
+                         r'Focus on|Report asking)\b', query, maxsplit=1, flags=re.IGNORECASE)[0]
+        brief = re.sub(r'^research\s+(?:for\s+me\s+|(?=open-air|shopping|strip|retail))',
+                       '', brief, flags=re.IGNORECASE)
+    if len(brief) > 450:
+        raise IntegrationError('Use a concise market, property type and price range for discovery.')
+    return brief.rstrip(' .')
+
+
 def research(query: str) -> list[dict]:
     """Spend at most three live searches; require an explicitly configured env key.
 
@@ -130,19 +163,14 @@ def research(query: str) -> list[dict]:
     search; the client requests full_content=False and never extracts linked URLs.
     Errors propagate explicitly; partial failures never substitute cached results.
     """
-    query = source_query(query)
+    brief = _search_brief(query)
     key = os.getenv("NIMBLE_API_KEY")
     if not key or not key.strip():
         raise IntegrationError("Live discovery requires NIMBLE_API_KEY in the environment.")
-    # In this retail workflow, "research centers in ..." is a command about
-    # shopping centers, not a search for laboratories. Preserve named markets
-    # such as Research Triangle and anchor the first (often only) search.
-    brief = re.sub(r'^research\s+cent(?:er|re)s\b', 'shopping centers', query,
-                   flags=re.IGNORECASE)
     prefixes = ("open-air strip shopping centers for sale broker listings ",
                 "commercial retail market vacancy asking rents household income report ",
                 "retail shopping center redevelopment investment properties ")
-    queries = [prefix + brief[:4000 - len(prefix)] for prefix in prefixes]
+    queries = [prefix + brief for prefix in prefixes]
     found = {}
     with start_agent_transaction("retailscope_ai.research"):
         with NimbleMCP(key, max_results=MAX_RESULTS, max_search_calls=MAX_SEARCHES) as client:
