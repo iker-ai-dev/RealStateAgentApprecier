@@ -3,6 +3,7 @@ import { Download, MessageSquare, RefreshCw } from "lucide-react";
 import {
   api,
   errorMessage,
+  displayTitle,
   safeUrl,
   type Artifact,
   type ArtifactSummary,
@@ -169,7 +170,7 @@ export function ArtifactsWorkspace({
                 onSelect?.(item.id);
               }}
             >
-              <h2>{item.title}</h2>
+              <h2>{displayTitle(item.title)}</h2>
               <p className="muted">
                 {item.status} · {new Date(item.created_at).toLocaleString()}
               </p>
@@ -198,7 +199,7 @@ export function ArtifactsWorkspace({
             <>
               <div className="agents-heading">
                 <div>
-                  <h2>{artifact.title}</h2>
+                  <h2>{displayTitle(artifact.title)}</h2>
                   <p className="muted">
                     {artifact.status} ·{" "}
                     {new Date(artifact.created_at).toLocaleString()}

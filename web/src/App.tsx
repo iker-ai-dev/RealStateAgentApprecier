@@ -20,6 +20,7 @@ import {
 import {
   api,
   errorMessage,
+  displayTitle,
   safeUrl,
   type AgentInput,
   type CalculatedScenario,
@@ -580,7 +581,7 @@ export default function App() {
                 title={thread.preview}
               >
                 <MessageSquare size={14} />
-                <span>{thread.preview || "Untitled conversation"}</span>
+                <span>{displayTitle(thread.preview) || "Untitled conversation"}</span>
               </button>
             ))}
           </div>

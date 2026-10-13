@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { api, pollResearch, safeUrl } from "./api";
+import { api, displayTitle, pollResearch, safeUrl } from "./api";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -7,6 +7,10 @@ afterEach(() => {
 });
 
 describe("API contract", () => {
+  it("uses readable market titles without rewriting ordinary conversations", () => {
+    expect(displayTitle("Research for me open-air shopping centers and strip centers for sale in Sacramento, CA, United States, with an asking pr")).toBe("Sacramento, CA · Retail research");
+    expect(displayTitle("What evidence should I verify?")).toBe("What evidence should I verify?");
+  });
   it("preserves nullable facts and inbox metadata in leads and research results", async () => {
     const lead = {
       id: "l1",
