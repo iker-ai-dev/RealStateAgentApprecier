@@ -295,9 +295,11 @@ export function AgentsWorkspace({
                   runs[agent.id]?.status || agent.last_status || "Not run yet",
                 )}
               </span>
-              {agent.last_error && (
-                <span className="error-text">{agent.last_error}</span>
-              )}
+              {agent.last_error &&
+                (!runs[agent.id] || runs[agent.id].id === agent.last_job_id) &&
+                busy !== agent.id && (
+                  <span className="error-text">{agent.last_error}</span>
+                )}
             </div>
             <div className="agent-actions">
               <button

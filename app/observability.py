@@ -68,6 +68,15 @@ WORKFLOW_MESSAGES = {
 STATUSES = frozenset(("ok", "internal_error", "cancelled", "unknown_error",
                       "deadline_exceeded", "unavailable", "resource_exhausted"))
 USAGE_KEYS = ("prompt_tokens", "completion_tokens", "total_tokens", "guardrail_tokens")
+VALIDATION_REASONS = frozenset((
+    "validation_unknown", "response_schema", "paragraph_count", "paragraph_text",
+    "citation_limit", "citation_source", "missing_evidence", "metric_reference",
+    "quotation_source", "quotation_mismatch", "numeric_provenance",
+    "conversation_citations", "conversation_claim", "host_markup",
+    "completion_type", "completion_metadata",
+))
+VALIDATION_MESSAGE = "RetailScope validation attempt"
+VALIDATION_PREFIX = "retailscope.validation."
 _UNSET = object()
 _client = None
 _environment = ENVIRONMENT
@@ -118,6 +127,27 @@ def _trace(raw: dict[str, Any], op: str) -> dict[str, Any]:
     return safe
 
 
+def _validation_fields(raw: Any, *, history: bool = False) -> dict[str, Any]:
+    """Rebuild complete enum-only records; never coerce or stringify inputs."""
+    if not isinstance(raw, dict):
+        return {}
+    safe = {}
+    prefixes = [VALIDATION_PREFIX]
+    if history:
+        prefixes.extend(f"{VALIDATION_PREFIX}attempt_{n}." for n in (1, 2))
+    for prefix in prefixes:
+        attempt = raw.get(prefix + "attempt")
+        outcome, reason = raw.get(prefix + "outcome"), raw.get(prefix + "reason")
+        if (type(attempt) is not int or attempt not in (1, 2)
+                or type(outcome) is not str or outcome not in ("passed", "rejected")
+                or type(reason) is not str
+                or (reason != "none" if outcome == "passed" else reason not in VALIDATION_REASONS)):
+            continue
+        safe.update({prefix + "attempt": attempt, prefix + "outcome": outcome,
+                     prefix + "reason": reason})
+    return safe
+
+
 def _scrub_event(event: dict[str, Any], hint: dict[str, Any]) -> dict[str, Any] | None:
     """Rebuild only the fixed manual error event, never a raw exception."""
     hint["attachments"] = []
@@ -136,6 +166,12 @@ def _scrub_event(event: dict[str, Any], hint: dict[str, Any]) -> dict[str, Any] 
             trace = _trace(raw_trace, op)
             if "trace_id" in trace and "span_id" in trace:
                 safe["contexts"] = {"trace": trace}
+                diagnostics = _validation_fields(raw_trace.get("data"), history=True)
+                if diagnostics:
+                    trace["data"] = diagnostics
+                    if (diagnostics.get(VALIDATION_PREFIX + "outcome") == "rejected"
+                            and diagnostics.get(VALIDATION_PREFIX + "attempt") == 2):
+                        safe["fingerprint"] = ["retailscope.validation", diagnostics[VALIDATION_PREFIX + "reason"]]
     name = event.get("transaction")
     if type(name) is str and name in TRANSACTIONS:
         safe["transaction"] = name
@@ -148,6 +184,18 @@ def _scrub_log(log: dict[str, Any], hint: dict[str, Any]) -> dict[str, Any] | No
     if not isinstance(log, dict) or not isinstance(log.get("attributes"), dict):
         return None
     attrs = log["attributes"]
+    if attrs.get("retailscope.telemetry") == "validation":
+        diagnostics = _validation_fields(attrs)
+        if (log.get("body") != VALIDATION_MESSAGE or not diagnostics
+                or attrs.get("retailscope.workflow") != "retailscope_ai.answer"
+                or not _hex(log.get("trace_id"), 32) or not _hex(log.get("span_id"), 16)
+                or type(log.get("time_unix_nano")) is not int or log["time_unix_nano"] <= 0):
+            return None
+        return {"body": VALIDATION_MESSAGE, "severity_text": "info", "severity_number": 9,
+                "time_unix_nano": log["time_unix_nano"], "trace_id": log["trace_id"],
+                "span_id": log["span_id"], "attributes": {
+                    "retailscope.telemetry": "validation", "retailscope.workflow": "retailscope_ai.answer",
+                    "sentry.environment": _environment, "sentry.release": _release, **diagnostics}}
     name, phase = attrs.get("retailscope.workflow"), attrs.get("retailscope.phase")
     if (attrs.get("retailscope.telemetry") != "workflow"
             or type(name) is not str or name not in TRANSACTIONS
@@ -165,7 +213,8 @@ def _scrub_log(log: dict[str, Any], hint: dict[str, Any]) -> dict[str, Any] | No
         "trace_id": log["trace_id"], "span_id": log["span_id"],
         "attributes": {"retailscope.telemetry": "workflow", "retailscope.workflow": name,
                        "retailscope.phase": phase, "sentry.environment": _environment,
-                       "sentry.release": _release},
+                       "sentry.release": _release,
+                       **(_validation_fields(attrs) if name == "retailscope_ai.answer" and phase != "started" else {})},
     }
 
 
@@ -206,6 +255,9 @@ def _scrub_transaction(event: dict[str, Any], hint: dict[str, Any]) -> dict[str,
             if counters:
                 counters["retailscope.billing_provider"] = "Snowflake Cortex"
                 safe["contexts"]["trace"]["data"] = counters
+            diagnostics = _validation_fields(raw_data, history=True)
+            if diagnostics:
+                safe["contexts"]["trace"].setdefault("data", {}).update(diagnostics)
     spans = event.get("spans")
     for raw in spans if isinstance(spans, list) else []:
         if not isinstance(raw, dict):
@@ -387,6 +439,42 @@ def record_cortex_usage(usage: dict[str, Any]) -> None:
         pass  # Optional telemetry must never change inference behavior.
 
 
+def record_validation(attempt: int, outcome: str, reason: str = "none") -> None:
+    """Record at most two validation results per answer, without exception content.
+
+    Callers assign reason codes at validation raise sites, never by parsing messages.
+    Outcomes are passed/rejected; rejection reasons are VALIDATION_REASONS and a
+    passed result always has reason none. Unknown rejection reasons become
+    validation_unknown. Invalid attempts/outcomes and duplicate attempts are ignored.
+    Attempts are control-flow
+    ordinals only; financial numbers and other arbitrary numeric fields are forbidden.
+    """
+    try:
+        if not _enabled():
+            return
+        if type(reason) is not str or reason not in VALIDATION_REASONS:
+            reason = "validation_unknown"
+        fields = _validation_fields({VALIDATION_PREFIX + "attempt": attempt,
+                                     VALIDATION_PREFIX + "outcome": outcome,
+                                     VALIDATION_PREFIX + "reason": "none" if outcome == "passed" else reason})
+        if not fields:
+            return
+        current = sentry_sdk.get_current_scope().span
+        transaction = current.containing_transaction if current is not None else None
+        if transaction is None or transaction.name != "retailscope_ai.answer":
+            return
+        data = transaction.get_trace_context().get("data", {})
+        if attempt <= data.get(VALIDATION_PREFIX + "attempt", 0):
+            return
+        for key, value in fields.items():
+            transaction.set_data(key, value)
+            transaction.set_data(key.replace(VALIDATION_PREFIX, f"{VALIDATION_PREFIX}attempt_{attempt}."), value)
+        sentry_logger.info(VALIDATION_MESSAGE, attributes={
+            "retailscope.telemetry": "validation", "retailscope.workflow": "retailscope_ai.answer", **fields})
+    except Exception:
+        pass  # Diagnostics cannot invalidate a paid result or trigger a retry.
+
+
 @contextmanager
 def start_span(op: str, name: str, data: dict[str, Any] | None = None) -> Iterator[Any]:
     """Time a known step; ignore data and never expose a mutable SDK span."""
@@ -430,10 +518,14 @@ def start_agent_transaction(name: str, data: dict[str, Any] | None = None) -> It
 def _workflow_log(name: str, phase: str) -> None:
     # Static strings only; the hook also removes SDK/scope-added attributes.
     try:
+        current = sentry_sdk.get_current_scope().span
+        transaction = current.containing_transaction if current is not None else None
+        diagnostics = (_validation_fields(transaction.get_trace_context().get("data"))
+                       if transaction is not None and name == "retailscope_ai.answer" and phase != "started" else {})
         logger = sentry_logger.error if phase == "failed" else sentry_logger.info
         logger(WORKFLOW_MESSAGES[phase], attributes={
             "retailscope.telemetry": "workflow", "retailscope.workflow": name,
-            "retailscope.phase": phase,
+            "retailscope.phase": phase, **diagnostics,
         })
     except Exception:
         pass  # Optional telemetry must not change application behavior.
@@ -453,6 +545,12 @@ def capture_exception(exc: Exception) -> None:
             sentry_sdk.capture_event({
                 "level": "error", "tags": {"retailscope.telemetry": "operation_error"},
                 "exception": {"values": [{"type": "OperationError", "value": ERROR_MESSAGE}]},
+                "contexts": {"trace": {
+                    **(span.get_trace_context() if span is not None else {}),
+                    "data": (_validation_fields(transaction.get_trace_context().get("data"), history=True)
+                             if span is not None and transaction is not None
+                             and transaction.name == "retailscope_ai.answer" else {}),
+                }},
             })
         except Exception:
             pass
