@@ -2,6 +2,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing, contextmanager
 from datetime import datetime, timedelta, timezone
 import json
+import gc
 import multiprocessing
 import os
 from pathlib import Path
@@ -628,6 +629,11 @@ class SnowflakeWorkspaceTests(unittest.TestCase):
             factory.assert_not_called()
             store.list_leads("owner")
             factory.assert_called_once_with({"account": "private"})
+            store.list_leads("other-owner")
+            factory.assert_called_once()
+            self.session.close.assert_not_called()
+            del store
+            gc.collect()
             self.session.close.assert_called_once()
 
     def test_owned_sessions_close_after_every_operation_and_errors(self):

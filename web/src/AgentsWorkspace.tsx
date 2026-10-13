@@ -33,6 +33,7 @@ export function AgentsWorkspace({
   const [agentFilter, setAgentFilter] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const [started, setStarted] = useState(active);
   const [version, setVersion] = useState(0);
   const [busy, setBusy] = useState("");
   const [runs, setRuns] = useState<
@@ -41,6 +42,11 @@ export function AgentsWorkspace({
   const action = useRef<AbortController | null>(null);
   const reads = useRef(new Map<string, AbortController>());
   const readIds = useRef(new Set<string>());
+  const activeRef = useRef(active);
+  activeRef.current = active;
+  useEffect(() => {
+    if (active) setStarted(true);
+  }, [active]);
   useEffect(
     () => () => {
       action.current?.abort();
@@ -49,48 +55,61 @@ export function AgentsWorkspace({
     [],
   );
   useEffect(() => {
-    if (!ready || !active) return;
+    if (!ready || !started) return;
     const controller = new AbortController();
     setLoading(true);
-    Promise.all([api.agents(controller.signal), api.leads(controller.signal)])
-      .then(([tasks, inbox]) => {
+    setError("");
+    const tasksRequest = api.agents(controller.signal).then((tasks) => {
+      if (controller.signal.aborted) return;
+      setAgents(tasks.agents);
+      setRuns((current) =>
+        Object.fromEntries(
+          Object.entries(current).filter(([id, run]) => {
+            const agent = tasks.agents.find((item) => item.id === id);
+            return (
+              !agent?.last_job_id ||
+              agent.last_job_id === run.id ||
+              action.current !== null
+            );
+          }),
+        ),
+      );
+    });
+    const inboxRequest = api.leads(controller.signal).then((inbox) => {
+      if (controller.signal.aborted) return;
+      setLeads(
+        inbox.leads.map((lead) =>
+          readIds.current.has(lead.id)
+            ? { ...lead, read_at: lead.read_at || "read" }
+            : lead,
+        ),
+      );
+    });
+    let timer: number;
+    function scheduleRefresh() {
+      timer = window.setTimeout(() => {
+        if (activeRef.current) setVersion((value) => value + 1);
+        else scheduleRefresh();
+      }, 30000);
+    }
+    Promise.allSettled([tasksRequest, inboxRequest])
+      .then((results) => {
         if (controller.signal.aborted) return;
-        setAgents(tasks.agents);
-        setRuns((current) =>
-          Object.fromEntries(
-            Object.entries(current).filter(([id, run]) => {
-              const agent = tasks.agents.find((item) => item.id === id);
-              return (
-                !agent?.last_job_id ||
-                agent.last_job_id === run.id ||
-                action.current !== null
-              );
-            }),
-          ),
-        );
-        setLeads(
-          inbox.leads.map((lead) =>
-            readIds.current.has(lead.id)
-              ? { ...lead, read_at: lead.read_at || "read" }
-              : lead,
-          ),
-        );
-      })
-      .catch((reason) => {
-        if (!controller.signal.aborted) setError(errorMessage(reason));
+        const failure = results.find((result) => result.status === "rejected");
+        if (failure?.status === "rejected")
+          setError(errorMessage(failure.reason));
       })
       .finally(() => {
-        if (!controller.signal.aborted) setLoading(false);
+        if (!controller.signal.aborted) {
+          setLoading(false);
+          scheduleRefresh();
+        }
       });
-    const timer = window.setTimeout(
-      () => setVersion((value) => value + 1),
-      30000,
-    );
     return () => {
       controller.abort();
       window.clearTimeout(timer);
     };
-  }, [ready, active, version]);
+  }, [ready, started, version]);
 
   async function perform(
     key: string,
