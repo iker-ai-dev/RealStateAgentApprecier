@@ -132,6 +132,22 @@ describe("API contract", () => {
 });
 
 describe("bounded polling", () => {
+  it.each(["partial", "PARTIAL"])("returns %s sources and warning without further polling", async (status) => {
+    const result = {
+      id: "j1",
+      status,
+      leads: [{ id: "l1", title: "Saved source", url: "https://example.org" }],
+      error: "Sources were saved, but the AI analysis could not be verified. You can inspect the sources or ask a follow-up question.",
+    };
+    const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify(result)));
+    vi.stubGlobal("fetch", fetch);
+    const update = vi.fn();
+    await expect(
+      pollResearch("j1", new AbortController().signal, update, 0, 3),
+    ).resolves.toEqual(result);
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(update).toHaveBeenCalledExactlyOnceWith(status);
+  });
   it("returns server leads only after completion", async () => {
     vi.spyOn(api, "researchResult")
       .mockResolvedValueOnce({ id: "j1", status: "pending", leads: [] })

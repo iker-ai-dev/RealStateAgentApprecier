@@ -224,7 +224,9 @@ export async function pollResearch(
     onStatus(result.status);
     const status = result.status.toLowerCase();
     if (
-      ["completed", "complete", "done", "succeeded", "success"].includes(status)
+      [
+        "completed", "complete", "done", "succeeded", "success", "partial",
+      ].includes(status)
     )
       return result;
     if (["failed", "error", "cancelled", "canceled"].includes(status))

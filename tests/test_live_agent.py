@@ -25,6 +25,32 @@ def analysis():
 
 
 class LiveAgentTests(unittest.TestCase):
+    def test_unused_legacy_limitations_cannot_reject_or_leak_into_answer(self):
+        response = analysis()
+        response['limitations'] = 'Unverified 123456789% return [99] https://untrusted.invalid'
+        self.provider.complete.return_value = agent.Completion(response, {}, 'claude-sonnet-4-6')
+        result = self.run_analysis()
+        self.assertNotIn('123456789', result['answer'])
+        self.assertNotIn('untrusted.invalid', result['answer'])
+        self.assertEqual(self.provider.complete.call_count, 1)
+        schema = self.provider.complete.call_args.args[1]['schema']
+        self.assertNotIn('limitations', schema['properties'])
+        self.assertNotIn('limitations', schema['required'])
+
+    def test_analysis_without_legacy_limitations_is_valid(self):
+        response = analysis()
+        response.pop('limitations')
+        self.provider.complete.return_value = agent.Completion(response, {}, 'claude-sonnet-4-6')
+        self.assertIn('rent-roll diligence', self.run_analysis()['answer'])
+
+    def test_unsupported_numbers_in_displayed_unknown_paragraph_still_fail(self):
+        response = analysis()
+        response['paragraphs'][-1]['text'] = 'Unknown tenant coverage of 123456789%.'
+        self.provider.complete.return_value = agent.Completion(response, {}, 'claude-sonnet-4-6')
+        with self.assertRaises(agent.LiveAgentError):
+            self.run_analysis()
+        self.assertEqual(self.provider.complete.call_count, 2)
+
     def setUp(self):
         self.env = patch.dict(os.environ, {"LANGSMITH_TRACING": "true", "LANGSMITH_API_KEY": CANARY}, clear=True)
         self.env.start()
