@@ -66,6 +66,50 @@
   color: var(--muted);
   font-size: 12px;
 }
+.chats-heading-button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: transparent;
+  border: 0;
+  padding: 8px 0;
+  color: var(--muted);
+  font: inherit;
+  font-weight: 600;
+}
+.chats-heading-button[aria-current="page"],
+.chats-heading-button:hover {
+  color: var(--mint);
+}
+.search-filter-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 16px;
+  padding-bottom: 10px;
+  font-size: 12px;
+}
+.search-filter-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  color: var(--muted);
+}
+.search-filter-toggle input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--mint);
+}
+.search-filter-toggle:has(input:checked) {
+  color: var(--mint);
+}
+.search-filter-summary {
+  color: var(--muted);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
 .conversation-menu {
   display: grid;
   align-content: start;

@@ -99,9 +99,178 @@ class LiveAgentTests(unittest.TestCase):
         self.active.stop()
         self.assertEqual(self.socket_mock.call_count, 0)
 
-    def run_analysis(self, message='What should I research next?', leads=None, history=None, *, scenario=None):
+    def run_analysis(self, message='What should I research next?', leads=None, history=None, *, scenario=None,
+                     mode='research'):
         with patch.object(agent, 'CortexProvider', return_value=self.provider):
-            return agent.analyze(message, LEADS if leads is None else leads, history, scenario=scenario)
+            return agent.analyze(message, LEADS if leads is None else leads, history, scenario=scenario, mode=mode)
+
+    def test_chat_model_writes_natural_replies_even_with_research_history(self):
+        history = [{'role': 'assistant', 'content': 'Conditional recommendation: Verify leases. Basis: saved report.'}]
+        for message, reply in [
+            ('hi', 'Hey! What would you like to talk about?'),
+            ('thanks', "You're welcome!"),
+            ('What is due diligence?', 'Due diligence means checking the evidence before making a decision.'),
+            ('What did you mean by that?', 'I meant checking what the lease actually says, not assuming it.'),
+            ('Can we talk about something else?', 'Of course. What has been on your mind?'),
+        ]:
+            with self.subTest(message=message):
+                self.provider.reset_mock()
+                self.provider.complete.return_value = agent.Completion({'paragraphs': [{
+                    'kind': 'conversation', 'text': reply, 'source_ids': [], 'quotes': [], 'metric_refs': []
+                }]}, {'total_tokens': 17}, agent.DEFAULT_MODEL)
+                result = self.run_analysis(message, history=history, mode='chat')
+                self.assertEqual(result['answer'], reply)
+                self.assertEqual(result['sources'], [])
+                self.assertEqual(result['usage'], {'total_tokens': 17})
+                self.assertEqual(result['model'], agent.DEFAULT_MODEL)
+                self.provider.complete.assert_called_once()
+                prompt, response_format = self.provider.complete.call_args.args
+                instructions, data = prompt.split('\nINPUT_DATA=', 1)
+                self.assertIn('conceptual', instructions)
+                self.assertNotIn('Lead with the decision', instructions)
+                self.assertEqual(json.loads(data)['history'], history)
+                self.assertEqual(json.loads(data)['EVIDENCE'], LEADS)
+                self.assertIn('conversation', response_format['schema']['properties']['paragraphs']['items']['properties']['kind']['enum'])
+
+    def test_conversation_kind_is_chat_only_and_cannot_bypass_numeric_provenance(self):
+        from app.underwriting import Scenario, calculate_scenario
+        scenario = calculate_scenario(Scenario(purchase_price=1_000_000, annual_noi=100_000,
+                                              exit_cap_rate=0.1, hold_years=5))
+        plain = {'kind': 'conversation', 'text': 'Happy to help.',
+                 'source_ids': [], 'quotes': [], 'metric_refs': []}
+        cases = [('research', plain, None),
+                 ('chat', dict(plain, text='Expect a 99% IRR.'), None),
+                 ('chat', dict(plain, text='IRR is 10%.'), scenario),
+                 ('chat', dict(plain, source_ids=['lead-a']), None),
+                 ('chat', dict(plain, metric_refs=['irr']), scenario),
+                 ('chat', dict(plain, quotes=[{'source_id': 'lead-a', 'quote': 'lead-a:q0'}]), None),
+                 ('chat', dict(plain, text='See https://fabricated.example'), None)]
+        for mode, paragraph, context in cases:
+            with self.subTest(mode=mode, paragraph=paragraph):
+                self.provider.reset_mock()
+                self.provider.complete.return_value = agent.Completion({'paragraphs': [paragraph]}, {}, agent.DEFAULT_MODEL)
+                with self.assertRaises(agent.LiveAgentError):
+                    self.run_analysis(mode=mode, scenario=context)
+                self.assertEqual(self.provider.complete.call_count, 2)
+
+        self.provider.complete.return_value = agent.Completion({'paragraphs': [plain]}, {}, agent.DEFAULT_MODEL)
+        self.assertEqual(self.run_analysis(mode='chat', scenario=scenario)['answer'], 'Happy to help.')
+
+    def test_chat_grounded_paragraphs_keep_research_validation(self):
+        mutations = [
+            lambda p: p.update(text='Expect a 99% return.'),
+            lambda p: p.update(source_ids=['invented']),
+            lambda p: p.update(quotes=[{'source_id': 'lead-a', 'quote': 'Invented evidence.'}]),
+            lambda p: p.update(quotes=[]),
+            lambda p: p.update(metric_refs=['invented']),
+        ]
+        for mutate in mutations:
+            with self.subTest(mutate=mutate):
+                response = analysis()
+                mutate(response['paragraphs'][0])
+                self.provider.complete.return_value = agent.Completion(response, {}, agent.DEFAULT_MODEL)
+                with self.assertRaises(agent.LiveAgentError):
+                    self.run_analysis(mode='chat')
+
+    def test_conversation_rejects_common_property_claims_and_written_financial_quantities(self):
+        claims = [
+            'This property is fully leased and guarantees a ten percent annual return',
+            'This property is fully leased.',
+            'The shopping center has stable tenants.',
+            'Your property generates reliable income.',
+            'Oak Plaza is fully occupied.',
+            'It is profitable.',
+            'You will earn guaranteed income.',
+            'Expect a ten percent annual return.',
+            'The yield is ten per cent.',
+            'Annual income is two hundred thousand dollars.',
+            'The price is two million.',
+            'Expect twenty-five basis points of extra yield.',
+            'Expect **ten percent** annual returns.',
+            'Expect twenty\u2011five percent annual returns.',
+        ]
+        for claim in claims:
+            with self.subTest(claim=claim):
+                self.provider.reset_mock()
+                self.provider.complete.return_value = agent.Completion({'paragraphs': [{
+                    'kind': 'conversation', 'text': claim, 'source_ids': [], 'quotes': [], 'metric_refs': []
+                }]}, {}, agent.DEFAULT_MODEL)
+                with self.assertRaisesRegex(agent.LiveAgentError, 'use a grounded paragraph kind'):
+                    self.run_analysis(mode='chat', leads=[])
+                self.assertEqual(self.provider.complete.call_count, 2)
+                repair = self.provider.complete.call_args.args[0]
+                self.assertIn('Do not merely relabel an unsupported assertion', repair)
+                self.assertIn('written-out amounts or rates', repair)
+
+    def test_conversation_accepts_ordinary_qualitative_definitions(self):
+        for explanation in [
+            'Hi! What would you like to discuss?',
+            'A fully leased property has tenants under lease; that does not guarantee returns.',
+            'Occupancy describes how much space tenants occupy.',
+            'Cap rate compares annual net operating income with the purchase price.',
+            'NOI means net operating income, before financing costs.',
+            'A rent roll summarizes the tenants and lease terms.',
+            'Returns are not guaranteed. Due diligence helps you understand the risks.',
+            'One useful question is whether the lease terms fit your goals.',
+            'I meant checking what the lease actually says, not assuming it.',
+        ]:
+            with self.subTest(explanation=explanation):
+                self.provider.reset_mock()
+                self.provider.complete.return_value = agent.Completion({'paragraphs': [{
+                    'kind': 'conversation', 'text': explanation, 'source_ids': [], 'quotes': [], 'metric_refs': []
+                }]}, {}, agent.DEFAULT_MODEL)
+                result = self.run_analysis(mode='chat', leads=[])
+                self.assertEqual(result['answer'], explanation)
+                self.assertEqual(result['sources'], [])
+                self.provider.complete.assert_called_once()
+
+    def test_conversation_claim_repair_uses_grounded_validation_not_just_relabeling(self):
+        rejected = {'paragraphs': [{'kind': 'conversation',
+                    'text': 'This property is fully leased and guarantees a ten percent annual return',
+                    'source_ids': [], 'quotes': [], 'metric_refs': []}]}
+        repaired = {'paragraphs': [analysis()['paragraphs'][0]]}
+        self.provider.complete.side_effect = [agent.Completion(rejected, {'total_tokens': 10}, agent.DEFAULT_MODEL),
+                                             agent.Completion(repaired, {'total_tokens': 20}, agent.DEFAULT_MODEL)]
+        result = self.run_analysis(mode='chat')
+        self.assertIn('Evidence analysis:', result['answer'])
+        self.assertIn('Basis:', result['answer'])
+        self.assertEqual(len(result['sources']), 1)
+        self.assertEqual(result['usage']['total_tokens'], 30)
+        repaired['paragraphs'][0]['quotes'] = []
+        self.provider.complete.side_effect = [agent.Completion(rejected, {}, agent.DEFAULT_MODEL),
+                                             agent.Completion(repaired, {}, agent.DEFAULT_MODEL)]
+        with self.assertRaisesRegex(agent.LiveAgentError, 'Factual analysis requires cited evidence'):
+            self.run_analysis(mode='chat')
+
+    def test_mixed_chat_keeps_model_order_and_one_grounded_basis(self):
+        response = analysis()
+        response['paragraphs'].insert(0, {'kind': 'conversation', 'text': 'Sure, let us walk through it.',
+                                         'source_ids': [], 'quotes': [], 'metric_refs': []})
+        self.provider.complete.return_value = agent.Completion(response, {}, agent.DEFAULT_MODEL)
+        result = self.run_analysis(mode='chat')
+        self.assertTrue(result['answer'].startswith('Sure, let us walk through it.\n\nEvidence analysis:'))
+        self.assertEqual(result['answer'].count('Basis:'), 1)
+        self.assertEqual(len(result['sources']), 1)
+
+    def test_chat_repair_can_return_conversation_without_a_synthetic_fallback(self):
+        response = {'paragraphs': [{'kind': 'conversation', 'text': 'Happy to explain. What part is unclear?',
+                                   'source_ids': [], 'quotes': [], 'metric_refs': []}]}
+        self.provider.complete.side_effect = [agent.Completion({}, {'total_tokens': 10}, agent.DEFAULT_MODEL),
+                                             agent.Completion(response, {'total_tokens': 15}, agent.DEFAULT_MODEL)]
+        result = self.run_analysis(mode='chat')
+        self.assertEqual(result['answer'], response['paragraphs'][0]['text'])
+        self.assertEqual(result['usage']['total_tokens'], 25)
+        self.assertEqual(result['usage']['model_calls'], 2)
+        self.provider.complete.side_effect = RuntimeError(CANARY)
+        self.provider.reset_mock()
+        with self.assertRaisesRegex(agent.LiveAgentError, 'no fallback'):
+            self.run_analysis('hi', mode='chat')
+        self.provider.complete.assert_called_once()
+
+    def test_invalid_mode_fails_before_model_call(self):
+        with self.assertRaisesRegex(agent.LiveAgentError, 'Invalid response mode'):
+            self.run_analysis(mode='unvalidated')
+        self.provider.complete.assert_not_called()
 
     def test_real_graph_has_three_nodes_and_one_model_call_with_citations(self):
         graph = agent.build_graph(self.provider)
