@@ -1,24 +1,19 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import { requestSignal } from "./requestSignal";
 import {
-  ArrowDown,
   ArrowUp,
+  Bot,
   Building2,
   ChevronRight,
   CircleAlert,
-  ExternalLink,
-  FileSearch,
+  FileText,
   Globe2,
-  History,
   LoaderCircle,
-  MapPin,
+  Menu,
   MessageSquare,
   Plus,
   PlugZap,
   RefreshCw,
-  Search,
-  ShieldCheck,
-  Sparkles,
+  SlidersHorizontal,
   Square,
   X,
 } from "lucide-react";
@@ -26,20 +21,19 @@ import {
   api,
   errorMessage,
   safeUrl,
+  type AgentInput,
   type CalculatedScenario,
   type ChatResult,
   type ConversationSummary,
   type Lead,
   type ProviderStatus,
-  type ResearchResult,
 } from "./api";
 import { Markdown } from "./Markdown";
 import { Mcp } from "./McpConnections";
-import { ScenarioForm } from "./ScenarioForm";
 import { SearchBuilder, defaultCriteria, searchPrompt } from "./SearchBuilder";
-import { LeadDetails } from "./LeadDetails";
 import { AgentsWorkspace } from "./AgentsWorkspace";
-import { streamResearch, stageLabel } from "./researchStream";
+import { ArtifactsWorkspace } from "./ArtifactsWorkspace";
+import { streamResearch } from "./researchStream";
 import { ResearchProgress } from "./ResearchProgress";
 
 type Message = {
@@ -47,441 +41,369 @@ type Message = {
   role: "user" | "assistant";
   text: string;
   sources?: ChatResult["sources"];
-  model?: string;
-  usage?: unknown;
-  scenarioAttached?: boolean;
 };
-type Conversation = { messages: Message[]; id?: string; error?: string };
-type View = "leads" | "chat" | "details";
-const blankConversation: Conversation = { messages: [] };
-
-function Empty({
-  icon: Icon,
-  title,
-  children,
-}: {
-  icon: typeof Search;
-  title: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <div className="empty-state">
-      <Icon size={28} strokeWidth={1.5} />
-      <h3>{title}</h3>
-      <p>{children}</p>
-    </div>
-  );
+type Thread = {
+  id?: string;
+  messages: Message[];
+  error?: string;
+  artifactId?: string;
+  unavailable?: boolean;
+};
+type Mode = "auto" | "research" | "ask" | "schedule";
+type Progress = { key: string; stage: string; started: number; leads: Lead[] };
+const emptyThread: Thread = { messages: [] };
+export function messageIntent(
+  message: string,
+  mode: Mode,
+): Exclude<Mode, "auto"> {
+  if (mode !== "auto") return mode;
+  if (
+    /\b(schedule|monitor|watch|background agent|every\s+(?:\d+|six|twelve|twenty.four)\s+hours?|daily)\b/i.test(
+      message,
+    )
+  )
+    return "schedule";
+  if (
+    /\b(find|search|discover|research|look for)\b/i.test(message) &&
+    /\b(properties|property|centers?|centres?|malls?|leads|listings|retail|deals|in\s+[A-Z])/i.test(
+      message,
+    )
+  )
+    return "research";
+  return "ask";
 }
-
 function Notice({
   children,
-  onRetry,
+  retry,
 }: {
   children: React.ReactNode;
-  onRetry?: () => void;
+  retry?: () => void;
 }) {
   return (
     <div className="notice" role="alert">
       <CircleAlert size={16} />
       <span>{children}</span>
-      {onRetry && (
+      {retry && (
         <button
           className="icon-button"
-          onClick={onRetry}
-          aria-label="Retry"
           title="Retry"
+          aria-label="Retry"
+          onClick={retry}
         >
-          <RefreshCw size={16} />
+          <RefreshCw size={15} />
         </button>
       )}
     </div>
   );
 }
-
 export default function App() {
-  const [section, setSection] = useState<"chat" | "agents">("chat");
-  const [criteria, setCriteria] = useState(defaultCriteria);
+  const [section, setSection] = useState<"chats" | "artifacts" | "agents">(
+    "chats",
+  );
   const [path, setPath] = useState(window.location.pathname);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [activeId, setActiveId] = useState(
+    () =>
+      new URLSearchParams(window.location.search).get("conversation") || "new",
+  );
+  const [threads, setThreads] = useState<Record<string, Thread>>({});
+  const activeThread = useRef(activeId);
+  activeThread.current = activeId;
+  const cache = useRef<Record<string, Thread>>({});
+  const [history, setHistory] = useState<ConversationSummary[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState("");
+  const [historyVersion, setHistoryVersion] = useState(0);
   const [providers, setProviders] = useState<ProviderStatus>();
   const [statusError, setStatusError] = useState("");
   const [statusVersion, setStatusVersion] = useState(0);
-  const [bootstrapReady, setBootstrapReady] = useState(false);
-  const [leads, setLeads] = useState<Lead[]>([]);
-  const [leadsLoading, setLeadsLoading] = useState(true);
-  const [leadsError, setLeadsError] = useState("");
-  const [leadsVersion, setLeadsVersion] = useState(0);
-  const [selectedId, setSelectedId] = useState<string>();
-  const [filter, setFilter] = useState("");
-  const [query, setQuery] = useState(searchPrompt(defaultCriteria));
-  const [researchStatus, setResearchStatus] = useState("");
-  const [researchBusy, setResearchBusy] = useState(false);
-  const [researchStartedAt, setResearchStartedAt] = useState(0);
-  const [researchSourceCount, setResearchSourceCount] = useState(0);
-  const [researchError, setResearchError] = useState("");
-  const [researchFinished, setResearchFinished] = useState(false);
-  const [view, setView] = useState<View>("chat");
-  const [draft, setDraft] = useState("");
-  const [conversations, setConversations] = useState<
-    Record<string, Conversation>
-  >({});
-  const [chatBusyKey, setChatBusyKey] = useState<string>();
-  const [propertyTab, setPropertyTab] = useState<"overview" | "scenario">(
-    "overview",
-  );
-  const [scenarios, setScenarios] = useState<
-    Record<string, CalculatedScenario | undefined>
-  >({});
-  const [attached, setAttached] = useState<Record<string, boolean>>({});
-  const [history, setHistory] = useState<ConversationSummary[]>([]);
-  const [historyVersion, setHistoryVersion] = useState(0);
-  const [historyLoading, setHistoryLoading] = useState(false);
-  const [historyError, setHistoryError] = useState("");
-  const [restoreId, setRestoreId] = useState<string | null>(() =>
-    new URLSearchParams(window.location.search).get("conversation"),
-  );
   const [threadLoading, setThreadLoading] = useState(false);
   const [threadVersion, setThreadVersion] = useState(0);
-  const researchController = useRef<AbortController | null>(null);
-  const chatController = useRef<AbortController | null>(null);
-  const leadsController = useRef<AbortController | null>(null);
-  const savedThreads = useRef(new Map<string, Conversation>());
-  const savedReports = useRef(new Map<string, ResearchResult>());
-  const chatBottom = useRef<HTMLDivElement>(null);
-  const selected = leads.find((lead) => lead.id === selectedId);
-  const contextKey = selected?.id || "__general__";
-  const activeContext = useRef(contextKey);
-  activeContext.current = contextKey;
-  const conversation = conversations[contextKey] || blankConversation;
-  const filtered = leads.filter((lead) =>
-    `${lead.title} ${lead.location || ""} ${lead.summary || ""}`
-      .toLowerCase()
-      .includes(filter.toLowerCase()),
-  );
-  const isMcp = ["/landing", "/landing/mcp"].includes(path.replace(/\/$/, ""));
-
+  const [draft, setDraft] = useState("");
+  const [mode, setMode] = useState<Mode>("auto");
+  const [busyKey, setBusyKey] = useState<string>();
+  const [progress, setProgress] = useState<Progress>();
+  const [artifactId, setArtifactId] = useState<string>();
+  const [artifactVersion, setArtifactVersion] = useState(0);
+  const [scenarios, setScenarios] = useState<Record<string, CalculatedScenario | undefined>>({});
+  const [agentVersion, setAgentVersion] = useState(0);
+  const [agentDraft, setAgentDraft] = useState<Partial<AgentInput>>();
+  const [agentDraftKey, setAgentDraftKey] = useState<string>();
+  const [agentError, setAgentError] = useState("");
+  const [agentSaving, setAgentSaving] = useState(false);
+  const [criteria, setCriteria] = useState(defaultCriteria);
+  const [promptBankOpen, setPromptBankOpen] = useState(false);
+  const controller = useRef<AbortController | null>(null);
+  const bottom = useRef<HTMLDivElement>(null);
+  const conversation = threads[activeId] || emptyThread;
+  const ready = Boolean(providers);
+  const isMcp = /^\/landing(?:\/mcp)?\/?$/.test(path);
+  function updateThread(key: string, update: (thread: Thread) => Thread) {
+    cache.current = {
+      ...cache.current,
+      [key]: update(cache.current[key] || emptyThread),
+    };
+    setThreads(cache.current);
+  }
+  function selectThread(id: string) {
+    setActiveId(id);
+    setSection("chats");
+    setSidebarOpen(false);
+    setDraft("");
+    const url = new URL(window.location.href);
+    if (id === "new") url.searchParams.delete("conversation");
+    else url.searchParams.set("conversation", id);
+    window.history.replaceState({}, "", url);
+  }
+  function newChat() {
+    if (controller.current || agentSaving) return;
+    updateThread("new", () => ({ messages: [] }));
+    setAgentDraft(undefined);
+    setAgentError("");
+    setMode("auto");
+    selectThread("new");
+  }
+  function openArtifact(id: string) {
+    setArtifactId(id);
+    setSection("artifacts");
+    setSidebarOpen(false);
+  }
+  function adoptThread(from: string, to: string) {
+    if (activeThread.current !== from) return;
+    setActiveId(to);
+    const url = new URL(window.location.href);
+    url.searchParams.set("conversation", to);
+    window.history.replaceState({}, "", url);
+  }
+  function navigate(next: string) {
+    window.history.pushState({}, "", next);
+    setPath(next);
+  }
   useEffect(() => {
     const pop = () => {
       setPath(window.location.pathname);
-      setRestoreId(
-        new URLSearchParams(window.location.search).get("conversation"),
+      setActiveId(
+        new URLSearchParams(window.location.search).get("conversation") ||
+          "new",
       );
-      setThreadVersion((value) => value + 1);
     };
     window.addEventListener("popstate", pop);
     return () => {
       window.removeEventListener("popstate", pop);
-      researchController.current?.abort();
-      chatController.current?.abort();
+      controller.current?.abort();
     };
   }, []);
   useEffect(() => {
-    const controller = new AbortController();
+    const pending = new AbortController();
     setStatusError("");
     api
-      .status(controller.signal)
-      .then((status) => {
-        if (!controller.signal.aborted) {
-          setProviders(status);
-          setBootstrapReady(true);
-        }
+      .status(pending.signal)
+      .then((value) => {
+        if (!pending.signal.aborted) setProviders(value);
       })
       .catch((error) => {
-        if (!controller.signal.aborted) {
-          setProviders(undefined);
-          setStatusError(errorMessage(error));
-          setLeadsLoading(false);
-        }
+        if (!pending.signal.aborted) setStatusError(errorMessage(error));
       });
-    return () => controller.abort();
+    return () => pending.abort();
   }, [statusVersion]);
   useEffect(() => {
-    if (!bootstrapReady) return;
-    const controller = new AbortController();
-    leadsController.current = controller;
-    setLeadsLoading(true);
-    setLeadsError("");
-    api
-      .leads(controller.signal)
-      .then((result) => {
-        if (controller.signal.aborted) return;
-        setLeads(result.leads);
-        setLeadsLoading(false);
-      })
-      .catch((error) => {
-        if (!controller.signal.aborted) {
-          setLeadsError(errorMessage(error));
-          setLeadsLoading(false);
-        }
-      });
-    return () => controller.abort();
-  }, [leadsVersion, bootstrapReady]);
-  useEffect(() => {
-    if (!bootstrapReady) return;
-    const controller = new AbortController();
+    if (!ready) return;
+    const pending = new AbortController();
     setHistoryLoading(true);
     setHistoryError("");
     api
-      .conversations(controller.signal)
-      .then((result) => {
-        if (controller.signal.aborted) return;
-        setHistory(result.conversations);
-        setHistoryLoading(false);
+      .conversations(pending.signal)
+      .then((value) => {
+        if (!pending.signal.aborted) setHistory(value.conversations);
       })
       .catch((error) => {
-        if (!controller.signal.aborted) {
-          setHistoryError(errorMessage(error));
-          setHistoryLoading(false);
-        }
+        if (!pending.signal.aborted) setHistoryError(errorMessage(error));
+      })
+      .finally(() => {
+        if (!pending.signal.aborted) setHistoryLoading(false);
       });
-    return () => controller.abort();
-  }, [historyVersion, bootstrapReady]);
+    return () => pending.abort();
+  }, [ready, historyVersion]);
   useEffect(() => {
-    if (!restoreId || !bootstrapReady) {
+    if (!ready || activeId === "new" || cache.current[activeId]) {
       setThreadLoading(false);
       return;
     }
-    const controller = new AbortController();
+    const id = activeId,
+      pending = new AbortController();
     setThreadLoading(true);
-    setHistoryError("");
-    setSelectedId(undefined);
-    setSection("chat");
-    setView("chat");
-    const cached = savedThreads.current.get(restoreId);
-    if (cached) updateConversation("__general__", () => cached);
     api
-      .conversation(restoreId, controller.signal)
-      .then((thread) => {
-        if (controller.signal.aborted) return;
-        if (thread.id !== restoreId)
+      .conversation(id, pending.signal)
+      .then((value) => {
+        if (pending.signal.aborted) return;
+        if (value.id !== id)
           throw new Error("Conversation response belongs to another thread.");
-        updateConversation("__general__", () => ({
-          id: thread.id,
-          messages: thread.messages.map((message, index) => ({
-            id: `${thread.id}-${index}`,
+        updateThread(id, () => ({
+          id,
+          messages: value.messages.map((message, index) => ({
+            id: `${id}-${index}`,
             role: message.role,
             text: message.content,
-            sources: message.sources ?? undefined,
-            model: message.model ?? undefined,
-            usage: message.usage,
+            sources: message.sources || undefined,
           })),
         }));
-        setThreadLoading(false);
       })
-      .catch((error) => {
-        if (!controller.signal.aborted) {
-          setHistoryError(errorMessage(error));
-          setThreadLoading(false);
-        }
-      });
-    return () => controller.abort();
-  }, [restoreId, threadVersion, bootstrapReady]);
-  useEffect(() => {
-    chatBottom.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [conversation.messages.length, chatBusyKey, view]);
-
-  function navigate(next: string) {
-    const url = new URL(next, window.location.origin);
-    if (conversation.id) url.searchParams.set("conversation", conversation.id);
-    window.history.pushState({}, "", url);
-    setPath(next);
-  }
-  function threadUrl(id?: string) {
-    const url = new URL(window.location.href);
-    if (id) url.searchParams.set("conversation", id);
-    else url.searchParams.delete("conversation");
-    window.history.replaceState({}, "", url);
-  }
-  function updateConversation(
-    key: string,
-    update: (value: Conversation) => Conversation,
-  ) {
-    setConversations((current) => {
-      const next = update(current[key] || blankConversation);
-      if (next.id) savedThreads.current.set(next.id, next);
-      return { ...current, [key]: next };
-    });
-  }
-
-  async function research(event: FormEvent | null, existingId?: string) {
-    event?.preventDefault();
-    if (existingId) {
-      researchController.current?.abort();
-      researchController.current = null;
-      chatController.current?.abort();
-      setSection("chat");
-      setView("chat");
-      setSelectedId(undefined);
-      setRestoreId(null);
-    }
-    if (
-      !bootstrapReady ||
-      (!existingId && !query.trim()) ||
-      researchController.current
-    )
-      return;
-    leadsController.current?.abort();
-    setLeadsLoading(false);
-    const controller = new AbortController();
-    researchController.current = controller;
-    const pending = requestSignal(controller.signal, 330_000);
-    const signal = pending.signal;
-    setResearchBusy(true);
-    setResearchStartedAt(Date.now());
-    setResearchSourceCount(0);
-    setResearchFinished(false);
-    setResearchError("");
-    setResearchStatus("Submitting");
-    try {
-      const job = existingId
-        ? { id: existingId, status: "Loading report" }
-        : await api.research(query.trim(), signal);
-      setResearchStatus(job.status);
-      if (!existingId && !signal.aborted) {
-        setSelectedId(undefined);
-        setRestoreId(null);
-        setSection("chat");
-        setView("chat");
-        threadUrl(job.id);
-        updateConversation("__general__", () => ({
-          id: job.id,
-          messages: [
-            { id: `${job.id}-brief`, role: "user", text: query.trim() },
-          ],
-        }));
-      }
-      const result =
-        savedReports.current.get(job.id) ??
-        (await streamResearch(job.id, signal, (snapshot) => {
-          if (signal.aborted) return;
-          setResearchStatus(snapshot.stage || snapshot.status);
-          setResearchSourceCount(snapshot.leads.length);
-          if (
-            snapshot.started_at &&
-            Number.isFinite(Date.parse(snapshot.started_at))
-          )
-            setResearchStartedAt(Date.parse(snapshot.started_at));
-          if (snapshot.leads.length) {
-            setLeads(snapshot.leads);
-            setLeadsError("");
-          }
-        }));
-      if (!controller.signal.aborted) {
-        if (result.status.toLowerCase() === "completed")
-          savedReports.current.set(job.id, result);
-        setLeads(result.leads);
-        setLeadsError("");
-        setSelectedId(undefined);
-        setResearchFinished(true);
-        const partial = result.status.toLowerCase() === "partial";
-        setResearchStatus(
-          partial ? "Sources saved; analysis unavailable" : "Completed",
-        );
-        if (partial) {
-          setResearchError(result.error || "");
-          setView("chat");
-          if (existingId) updateConversation("__general__", () => savedThreads.current.get(job.id) || { id: job.id, messages: [] });
-        }
-        setFilter("");
-        if (!partial && result.analysis) {
-          updateConversation(
-            "__general__",
-            () =>
-              (existingId && savedThreads.current.get(job.id)) || {
-                id: job.id,
-                messages: [
-                  ...(!existingId
-                    ? [
-                        {
-                          id: `${job.id}-brief`,
-                          role: "user" as const,
-                          text: query.trim(),
-                        },
-                      ]
-                    : []),
+      .catch(async (error) => {
+        if (pending.signal.aborted) return;
+        try {
+          const job = await api.researchResult(id, pending.signal);
+          if (pending.signal.aborted) return;
+          updateThread(id, () => ({
+            id,
+            unavailable: ["queued", "running"].includes(job.status),
+            messages: job.analysis
+              ? [
                   {
-                    id: `${job.id}-report`,
+                    id: `${id}-report`,
                     role: "assistant",
-                    text: result.analysis!.answer,
-                    sources: result.analysis!.sources,
-                    model: result.analysis!.model,
+                    text: job.analysis.answer,
+                    sources: job.analysis.sources,
                   },
-                ],
-              },
-          );
-          threadUrl(job.id);
-          setHistoryVersion((version) => version + 1);
-          setView("chat");
+                ]
+              : [],
+            artifactId: ["completed", "partial"].includes(job.status)
+              ? id
+              : undefined,
+            error:
+              job.error ||
+              (["queued", "running"].includes(job.status)
+                ? "Research is still running. Refresh this conversation shortly, or check Artifacts when it completes."
+                : undefined),
+          }));
+        } catch {
+          if (!pending.signal.aborted)
+            updateThread(id, () => ({
+              id,
+              unavailable: true,
+              messages: [],
+              error: errorMessage(error),
+            }));
         }
-      }
-    } catch (error) {
-      if (!controller.signal.aborted)
-        setResearchError(
-          signal.aborted
-            ? "Research timed out. Please try again later."
-            : errorMessage(error),
-        );
-    } finally {
-      pending.dispose();
-      if (researchController.current === controller) {
-        researchController.current = null;
-        setResearchBusy(false);
-      }
-    }
-  }
-
-  function openReport(id: string) {
-    researchController.current?.abort();
-    chatController.current?.abort();
-    setDraft("");
-    setSelectedId(undefined);
-    setSection("chat");
-    setView("chat");
-    threadUrl(id);
-    setRestoreId(id);
-    setThreadVersion((value) => value + 1);
-  }
+      })
+      .finally(() => {
+        if (!pending.signal.aborted) setThreadLoading(false);
+      });
+    return () => pending.abort();
+  }, [activeId, ready, threadVersion]);
+  useEffect(() => {
+    bottom.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+  }, [conversation.messages.length, activeId]);
 
   async function send(event: FormEvent) {
     event.preventDefault();
     if (
-      !bootstrapReady ||
-      threadLoading ||
+      !ready ||
       !draft.trim() ||
-      chatController.current
+      controller.current ||
+      threadLoading ||
+      conversation.unavailable
     )
       return;
-    const key = contextKey;
-    const message = draft.trim();
-    const controller = new AbortController();
-    chatController.current = controller;
+    const message = draft.trim(),
+      intent = messageIntent(message, mode),
+      pending = new AbortController();
+    let key = activeId;
+    controller.current = pending;
+    setMode("auto");
+    setBusyKey(key);
     setDraft("");
-    setChatBusyKey(key);
-    const scenario = attached[key] ? scenarios[key]?.input : undefined;
-    updateConversation(key, (current) => ({
+    setPromptBankOpen(false);
+    updateThread(key, (current) => ({
       ...current,
       error: undefined,
       messages: [
         ...current.messages,
-        {
-          id: crypto.randomUUID(),
-          role: "user",
-          text: message,
-          scenarioAttached: Boolean(scenario),
-        },
+        { id: crypto.randomUUID(), role: "user", text: message },
       ],
     }));
     try {
-      const result = await api.chat(
-        {
+      if (intent === "research") {
+        const job = await api.research(message, pending.signal);
+        if (pending.signal.aborted) return;
+        const previousKey = key;
+        key = job.id;
+        updateThread(key, () => ({
+          id: key,
+          messages: [{ id: `${key}-brief`, role: "user", text: message }],
+        }));
+        adoptThread(previousKey, key);
+        setBusyKey(key);
+        setProgress({ key, stage: job.status, started: Date.now(), leads: [] });
+        const result = await streamResearch(key, pending.signal, (snapshot) => {
+          if (!pending.signal.aborted)
+            setProgress((current) => ({
+              key,
+              stage: snapshot.stage || snapshot.status,
+              started:
+                snapshot.started_at &&
+                Number.isFinite(Date.parse(snapshot.started_at))
+                  ? Date.parse(snapshot.started_at)
+                  : current?.started || Date.now(),
+              leads: snapshot.leads,
+            }));
+        });
+        if (pending.signal.aborted) return;
+        updateThread(key, (current) => ({
+          ...current,
+          artifactId: key,
+          error: result.error || undefined,
+          messages: [
+            ...current.messages,
+            ...(result.analysis
+              ? [
+                  {
+                    id: `${key}-report`,
+                    role: "assistant" as const,
+                    text: result.analysis.answer,
+                    sources: result.analysis.sources,
+                  },
+                ]
+              : []),
+          ],
+        }));
+        setArtifactVersion((value) => value + 1);
+      } else if (intent === "schedule") {
+        const result = await api.agentDraft(
           message,
-          ...(selected ? { lead_id: selected.id } : {}),
-          ...(conversation.id ? { conversation_id: conversation.id } : {}),
-          ...(scenario ? { scenario } : {}),
-        },
-        controller.signal,
-      );
-      if (!controller.signal.aborted) {
-        updateConversation(key, (current) => ({
+          conversation.id,
+          pending.signal,
+        );
+        if (pending.signal.aborted) return;
+        const id = result.conversation_id || key,
+          current = cache.current[key];
+        updateThread(id, () => ({
+          ...current,
+          id: id === "new" ? undefined : id,
+          messages: [
+            ...current.messages,
+            {
+              id: crypto.randomUUID(),
+              role: "assistant",
+              text: result.message,
+            },
+          ],
+        }));
+        setAgentDraft(result.draft);
+        setAgentDraftKey(id);
+        setAgentError(result.warnings.join(" "));
+        adoptThread(key, id);
+      } else {
+        const result = await api.chat(
+          {
+            message,
+            ...(scenarios[key] ? {scenario:scenarios[key]!.input} : {}),
+            ...(conversation.id ? { conversation_id: conversation.id } : {}),
+          },
+          pending.signal,
+        );
+        if (pending.signal.aborted) return;
+        const current = cache.current[key];
+        updateThread(result.conversation_id, () => ({
           ...current,
           id: result.conversation_id,
           messages: [
@@ -494,51 +416,66 @@ export default function App() {
             },
           ],
         }));
-        setHistoryVersion((value) => value + 1);
-        if (activeContext.current === key) threadUrl(result.conversation_id);
+        adoptThread(key, result.conversation_id);
       }
+      setHistoryVersion((value) => value + 1);
     } catch (error) {
-      if (!controller.signal.aborted)
-        updateConversation(key, (current) => ({
+      if (!pending.signal.aborted)
+        updateThread(key, (current) => ({
           ...current,
           error: errorMessage(error),
         }));
     } finally {
-      if (chatController.current === controller) {
-        chatController.current = null;
-        setChatBusyKey(undefined);
+      if (controller.current === pending) {
+        controller.current = null;
+        setBusyKey(undefined);
+        setProgress(undefined);
       }
     }
   }
-
-  const providerPills = (
-    <div
-      className="provider-pills"
-      aria-label="Provider credential configuration"
-    >
-      {(["snowflake", "nimble"] as const).map((provider) => (
-        <span
-          key={provider}
-          className={`provider ${providers ? (providers.providers[provider] ? "connected" : "disconnected") : "unknown"}`}
-          title={`${provider}: ${providers ? (providers.providers[provider] ? "Credentials configured; network health not checked" : "Credentials not configured") : "Configuration unavailable"}`}
-        >
-          <span className="status-dot" />
-          {provider === "snowflake" ? "Snowflake" : "Nimble"}
-          <span className="sr-only">
-            {providers
-              ? providers.providers[provider]
-                ? " credentials configured"
-                : " credentials not configured"
-              : " configuration unknown"}
-          </span>
-        </span>
-      ))}
-    </div>
-  );
-
+  async function confirmAgent(event: FormEvent) {
+    event.preventDefault();
+    if (!agentDraft || agentSaving || !agentDraft.cadence_hours) return;
+    const key = activeId;
+    setAgentSaving(true);
+    setAgentError("");
+    try {
+      const agent = await api.createAgent({
+        ...agentDraft,
+        conversation_id: conversation.id,
+      } as AgentInput);
+      updateThread(key, (current) => ({
+        ...current,
+        messages: [
+          ...current.messages,
+          {
+            id: crypto.randomUUID(),
+            role: "assistant",
+            text: `**${agent.name}** is scheduled every **${agent.cadence_hours} hours**. Next run: ${agent.next_run_at ? new Date(agent.next_run_at).toLocaleString() : "pending"}. Reports will appear in **Artifacts**.`,
+          },
+        ],
+      }));
+      setAgentDraft(undefined);
+      setAgentVersion((value) => value + 1);
+      setHistoryVersion((value) => value + 1);
+    } catch (error) {
+      setAgentError(errorMessage(error));
+    } finally {
+      setAgentSaving(false);
+    }
+  }
   return (
-    <div className="app-shell">
+    <div className="app-shell chat-first">
       <header className="app-header">
+        <button
+          className="icon-button sidebar-toggle"
+          aria-label="Toggle sidebar"
+          title="Toggle sidebar"
+          aria-expanded={sidebarOpen}
+          onClick={() => setSidebarOpen((value) => !value)}
+        >
+          <Menu size={20} />
+        </button>
         <a
           className="brand"
           href="/"
@@ -554,509 +491,490 @@ export default function App() {
             RetailScope <b>AI</b>
           </span>
         </a>
-        <span className="header-divider" />
-        <span className="header-label">Research workspace</span>
         <div className="header-right">
-          {providerPills}
+          <span className="header-label">Research workspace</span>
           <a
-            className={`connection-link ${isMcp ? "active" : ""}`}
             href="/landing"
+            className="connection-link"
+            aria-label="MCP"
+            title="MCP connections"
             onClick={(event) => {
               event.preventDefault();
               navigate("/landing");
             }}
-            title="MCP connections"
-            aria-label="MCP"
           >
             <PlugZap size={17} />
             <span>MCP</span>
           </a>
         </div>
       </header>
-      {isMcp && statusError && (
-        <Notice onRetry={() => setStatusVersion((value) => value + 1)}>
-          API session unavailable. Please retry.
-        </Notice>
-      )}
-      {isMcp && <Mcp ready={bootstrapReady} onBack={() => navigate("/")} />}
-      <div hidden={isMcp}>
-        {statusError && (
-          <div className="status-notice">
-            <CircleAlert size={14} />
-            <span>Provider configuration unavailable</span>
-            <button
-              className="text-button"
-              title={statusError}
-              onClick={() => setStatusVersion((value) => value + 1)}
-            >
-              Retry
-            </button>
-          </div>
-        )}
-        <nav className="workspace-nav" aria-label="Main workspace">
+      {isMcp && <Mcp ready={ready} onBack={() => navigate("/")} />}
+      <div className="workspace-shell" hidden={isMcp}>
+        <aside
+          className={`workspace-sidebar ${sidebarOpen ? "is-open" : ""}`}
+          aria-label="Workspace sidebar"
+        >
           <button
-            aria-current={section === "chat" ? "page" : undefined}
-            onClick={() => setSection("chat")}
+            className="primary-button new-chat"
+            disabled={Boolean(busyKey) || agentSaving}
+            onClick={newChat}
           >
-            <MessageSquare size={16} />
-            Chat
+            <Plus size={17} />
+            New chat
           </button>
-          <button
-            aria-current={section === "agents" ? "page" : undefined}
-            onClick={() => setSection("agents")}
-          >
-            <History size={16} />
-            Background agents / Inbox
-          </button>
-        </nav>
-        <div hidden={section !== "agents"}>
-          <AgentsWorkspace
-            ready={bootstrapReady}
-            active={!isMcp && section === "agents"}
-            onOpenReport={(id) => {
-              void research(null, id);
-            }}
-            onResearchLead={(lead) => {
-              setLeads((current) => [
-                lead,
-                ...current.filter((item) => item.id !== lead.id),
-              ]);
-              setSelectedId(lead.id);
-              setSection("chat");
-              setView("chat");
-              setDraft("");
-            }}
-          />
-        </div>
-        <div hidden={section !== "chat"}>
-          <nav className="mobile-nav" aria-label="Workspace view">
+          <nav aria-label="Main workspace">
             {(
               [
-                ["leads", Search, "Build search"],
-                ["chat", MessageSquare, "Chat"],
-                ["details", Building2, "Property"],
+                ["chats", MessageSquare, "Chats"],
+                ["artifacts", FileText, "Artifacts"],
+                ["agents", Bot, "Agents"],
               ] as const
             ).map(([id, Icon, label]) => (
               <button
                 key={id}
-                aria-current={view === id ? "page" : undefined}
-                onClick={() => setView(id)}
+                aria-current={section === id ? "page" : undefined}
+                onClick={() => {
+                  setSection(id);
+                  setSidebarOpen(false);
+                }}
               >
-                <Icon size={16} />
+                <Icon size={17} />
                 {label}
               </button>
             ))}
           </nav>
-          <main className="workspace">
-            <section
-              className={`leads-pane pane ${view === "leads" ? "mobile-active" : ""}`}
-              aria-label="Lead discovery"
+          <div className="sidebar-heading">
+            <span>Conversations</span>
+            <button
+              className="icon-button"
+              title="Refresh conversations"
+              aria-label="Refresh conversations"
+              disabled={historyLoading}
+              onClick={() => setHistoryVersion((value) => value + 1)}
             >
-              <div className="pane-heading">
-                <div>
-                  <span className="eyebrow">RESEARCH</span>
-                  <h1>
-                    Build search <span className="count">{leads.length}</span>
-                  </h1>
-                </div>
+              <RefreshCw size={13} className={historyLoading ? "spin" : ""} />
+            </button>
+          </div>
+          {historyError && (
+            <Notice retry={() => setHistoryVersion((value) => value + 1)}>
+              {historyError}
+            </Notice>
+          )}
+          <div className="conversation-menu" aria-label="Past conversations">
+            {historyLoading && !history.length && (
+              <p className="muted">Loading conversations...</p>
+            )}
+            {!historyLoading && !history.length && (
+              <p className="muted">No saved conversations</p>
+            )}
+            {history.map((thread) => (
+              <button
+                key={thread.id}
+                disabled={Boolean(busyKey) || agentSaving}
+                aria-current={
+                  activeId === thread.id && section === "chats"
+                    ? "page"
+                    : undefined
+                }
+                onClick={() => selectThread(thread.id)}
+                title={thread.preview}
+              >
+                <MessageSquare size={14} />
+                <span>{thread.preview || "Untitled conversation"}</span>
+              </button>
+            ))}
+          </div>
+          <div className="sidebar-footer">
+            <span className={`status-dot ${ready ? "ready" : ""}`} />
+            {ready
+              ? "Workspace connected"
+              : statusError
+                ? "Connection unavailable"
+                : "Connecting..."}
+          </div>
+        </aside>
+        {sidebarOpen && (
+          <button
+            className="sidebar-backdrop"
+            aria-label="Close sidebar"
+            onClick={() => setSidebarOpen(false)}
+          />
+        )}
+        <main className="workspace-content">
+          {statusError && (
+            <Notice retry={() => setStatusVersion((value) => value + 1)}>
+              {statusError}
+            </Notice>
+          )}
+          <div hidden={section !== "artifacts"}>
+            <ArtifactsWorkspace
+              ready={ready}
+              active={!isMcp && section === "artifacts"}
+              refreshKey={artifactVersion}
+              selectedId={artifactId}
+              onSelect={setArtifactId}
+              onOpenChat={(id,scenario)=>{if(scenario)setScenarios(current=>({...current,[id]:scenario}));selectThread(id);}}
+            />
+          </div>
+          <div hidden={section !== "agents"}>
+            <AgentsWorkspace
+              ready={ready}
+              active={!isMcp && section === "agents"}
+              refreshKey={agentVersion}
+              onOpenReport={openArtifact}
+              onResearchLead={(lead) => {
+                setSection("chats");
+                setDraft(`Analyze ${lead.title} using its source: ${lead.url}`);
+                setMode("ask");
+              }}
+            />
+          </div>
+          <section
+            className="chat-surface"
+            aria-label="Research chat"
+            hidden={section !== "chats"}
+          >
+            <header className="chat-surface-heading">
+              <div>
+                <MessageSquare size={17} />
+                <h1>
+                  {conversation.messages.length
+                    ? "Research conversation"
+                    : "New conversation"}
+                </h1>
+              </div>
+              {conversation.id && (
                 <button
                   className="icon-button"
-                  title="Refresh leads"
-                  aria-label="Refresh leads"
-                  disabled={leadsLoading || researchBusy}
+                  title="Refresh conversation"
+                  aria-label="Refresh conversation"
+                  disabled={Boolean(busyKey) || threadLoading}
                   onClick={() => {
-                    setResearchFinished(false);
-                    setLeadsVersion((value) => value + 1);
+                    delete cache.current[activeId];
+                    setThreadVersion((value) => value + 1);
                   }}
                 >
-                  <RefreshCw size={16} className={leadsLoading ? "spin" : ""} />
+                  <RefreshCw size={15} />
                 </button>
-              </div>
-              <form className="research-form" onSubmit={research}>
-                <SearchBuilder
-                  value={criteria}
-                  disabled={researchBusy}
-                  onChange={(next) => {
-                    setCriteria(next);
-                    setQuery(searchPrompt(next));
-                  }}
-                />
-                <details className="edit-prompt">
-                  <summary>Edit prompt</summary>
-                  <label className="sr-only" htmlFor="research-query">
-                    Research brief
-                  </label>
-                  <textarea
-                    id="research-query"
-                    value={query}
-                    onChange={(event) => setQuery(event.target.value)}
-                    placeholder="Retail centers in Phoenix with redevelopment potential..."
-                    rows={3}
-                    disabled={researchBusy}
-                    minLength={3}
-                    maxLength={2000}
-                  />
-                </details>
-                <div className="research-actions">
-                  <span>
-                    <Globe2 size={13} />
-                    Public-source research
-                  </span>
-                  {researchBusy ? (
-                    <button
-                      type="button"
-                      className="text-button"
-                      onClick={() => {
-                        researchController.current?.abort();
-                        setResearchStatus("Cancelled");
-                        setResearchError(
-                          "Research cancelled. No new results were loaded.",
-                        );
-                      }}
-                    >
-                      <Square size={13} />
-                      Cancel
-                    </button>
-                  ) : (
-                    <button
-                      className="primary-button"
-                      type="submit"
-                      disabled={!bootstrapReady || query.trim().length < 3}
-                    >
-                      <Search size={15} />
-                      Send prompt
-                    </button>
-                  )}
-                </div>
-              </form>
-              {researchBusy && (
-                <div className="progress" role="status">
-                  <LoaderCircle size={16} className="spin" />
-                  <span>
-                    <b>{stageLabel(researchStatus)}</b>
-                  </span>
-                </div>
               )}
-              {!researchBusy &&
-                researchFinished &&
-                researchStatus === "Sources saved; analysis unavailable" && (
-                  <div className="progress" role="status">
-                    <span>{researchStatus}</span>
-                  </div>
-                )}
-              {leadsError && (
-                <Notice onRetry={() => setLeadsVersion((value) => value + 1)}>
-                  {leadsError}
-                </Notice>
-              )}
-              <div className="lead-filter">
-                <Search size={15} />
-                <input
-                  aria-label="Filter leads"
-                  placeholder="Filter leads"
-                  value={filter}
-                  onChange={(event) => setFilter(event.target.value)}
-                />
-                {filter && (
-                  <button
-                    className="icon-button"
-                    title="Clear filter"
-                    aria-label="Clear filter"
-                    onClick={() => setFilter("")}
-                  >
-                    <X size={14} />
-                  </button>
-                )}
-              </div>
-              <div
-                className="lead-list"
-                aria-busy={leadsLoading || researchBusy}
-              >
-                {leadsLoading && !leads.length ? (
-                  <div className="loading-state" role="status">
-                    <LoaderCircle size={22} className="spin" />
-                    Loading leads
-                  </div>
-                ) : filtered.length ? (
-                  filtered.map((lead) => (
-                    <button
-                      className={`lead-row ${selected?.id === lead.id ? "selected" : ""}`}
-                      key={lead.id}
-                      aria-pressed={selected?.id === lead.id}
-                      onClick={() => {
-                        setSelectedId(lead.id);
-                        setView("details");
-                        setDraft("");
-                      }}
-                    >
-                      <div className="lead-row-top">
-                        <span className="lead-icon">
-                          <Building2 size={16} />
-                        </span>
-                        <span className="lead-status">
-                          {lead.status || "Source lead"}
-                        </span>
-                        <ChevronRight size={15} />
-                      </div>
-                      <h3>{lead.title}</h3>
-                      {lead.location && (
-                        <p className="lead-location">
-                          <MapPin size={12} />
-                          {lead.location}
-                        </p>
-                      )}
-                      {lead.summary && (
-                        <p className="lead-summary">{lead.summary}</p>
-                      )}
-                    </button>
-                  ))
-                ) : (
-                  <Empty
-                    icon={FileSearch}
-                    title={
-                      filter
-                        ? "No matching leads"
-                        : researchFinished
-                          ? "No leads returned"
-                          : "Your next opportunity starts here"
-                    }
-                  >
-                    {filter
-                      ? "Try another filter."
-                      : researchFinished
-                        ? "Refine your research brief and search again."
-                        : leadsError
-                          ? "Leads will appear when the API is available."
-                          : "No leads have been returned yet."}
-                  </Empty>
-                )}
-              </div>
-              <div className="pane-footer">
-                <ShieldCheck size={13} />
-                Source leads require verification
-              </div>
-            </section>
-            <section
-              className={`chat-pane pane ${view === "chat" ? "mobile-active" : ""}`}
-              aria-label="Research chat"
+            </header>
+            <div
+              className="chat-scroll"
+              aria-label="Conversation"
+              aria-live="polite"
             >
-              <div className="pane-heading">
-                <div>
-                  <span className="eyebrow cyan">RESEARCH</span>
-                  <h2>Ask RetailScope</h2>
-                </div>
-                <div className="chat-tools">
-                  <div className="history-picker">
-                    <History size={15} />
-                    <select
-                      aria-label="Chat history"
-                      value={conversation.id || ""}
-                      disabled={
-                        Boolean(chatBusyKey) || historyLoading || threadLoading
-                      }
-                      onChange={(event) => {
-                        setDraft("");
-                        const id = event.target.value;
-                        threadUrl(id || undefined);
-                        if (id) openReport(id);
-                        else {
-                          setRestoreId(null);
-                          updateConversation(contextKey, () => ({
-                            messages: [],
-                          }));
-                        }
-                      }}
-                    >
-                      <option value="">
-                        {historyLoading ? "Loading history" : "Chat history"}
-                      </option>
-                      {conversation.id &&
-                        !history.some(
-                          (thread) => thread.id === conversation.id,
-                        ) && (
-                          <option value={conversation.id}>
-                            Current conversation
-                          </option>
-                        )}
-                      {history.map((thread) => (
-                        <option key={thread.id} value={thread.id}>
-                          {thread.preview.slice(0, 70) || "Saved conversation"}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                  <button
-                    className="icon-button"
-                    title="New conversation"
-                    aria-label="New conversation"
-                    disabled={
-                      Boolean(chatBusyKey) ||
-                      threadLoading ||
-                      (!conversation.messages.length && !restoreId)
-                    }
-                    onClick={() => {
-                      setRestoreId(null);
-                      threadUrl();
-                      updateConversation(contextKey, () => ({
-                        messages: [],
-                      }));
-                      setDraft("");
-                    }}
-                  >
-                    <Plus size={18} />
-                  </button>
-                </div>
-              </div>
-              <div className="chat-context">
-                <span className="context-icon">
-                  <MessageSquare size={14} />
-                </span>
-                <span>{selected ? selected.title : "Ad hoc research"}</span>
-                {selected && (
-                  <button
-                    className="icon-button"
-                    title="Return to ad hoc chat"
-                    aria-label="Return to ad hoc chat"
-                    onClick={() => {
-                      setSelectedId(undefined);
-                      setDraft("");
-                    }}
-                  >
-                    <X size={14} />
-                  </button>
-                )}
-              </div>
-              <div
-                className="chat-history"
-                aria-label="Conversation"
-                aria-live="polite"
-              >
-                {researchBusy && (
-                  <ResearchProgress
-                    stage={researchStatus}
-                    startedAt={researchStartedAt}
-                    count={researchSourceCount}
-                  />
-                )}
-                {!researchBusy && researchError && (
-                  <Notice>{researchError}</Notice>
-                )}
-                {historyError && (
-                  <Notice
-                    onRetry={() => {
-                      if (restoreId) setThreadVersion((value) => value + 1);
-                      else setHistoryVersion((value) => value + 1);
-                    }}
-                  >
-                    {historyError}
-                  </Notice>
-                )}
-                {threadLoading && (
-                  <div className="loading-state" role="status">
-                    <LoaderCircle size={20} className="spin" />
-                    Loading conversation
-                  </div>
-                )}
-                {!conversation.messages.length && !threadLoading && (
+              {threadLoading && (
+                <p className="loading-state" role="status">
+                  <LoaderCircle size={18} className="spin" />
+                  Loading conversation
+                </p>
+              )}
+              {!conversation.messages.length &&
+                !threadLoading &&
+                !conversation.error && (
                   <div className="chat-welcome">
                     <span className="chat-emblem">
-                      <Sparkles size={28} strokeWidth={1.5} />
+                      <Building2 size={28} />
                     </span>
-                    <h2>What are you looking into?</h2>
-                    <p>
-                      {selected
-                        ? "Explore the selected property and its source evidence."
-                        : "Ask a property question or investigate a market."}
-                    </p>
+                    <h2>What should we research?</h2>
                     <div className="suggestions">
                       {[
-                        "What evidence should I verify?",
-                        "Which risks need more research?",
-                      ].map((prompt) => (
+                        [
+                          "Find shopping centers",
+                          searchPrompt(criteria),
+                          "research",
+                        ],
+                        [
+                          "Schedule a background agent",
+                          "Watch shopping centers in Phoenix, AZ from $1M to $10M every 6 hours for value-add opportunities.",
+                          "schedule",
+                        ],
+                        [
+                          "Review the evidence",
+                          "What evidence should I verify before evaluating these properties?",
+                          "ask",
+                        ],
+                      ].map(([label, prompt, intent]) => (
                         <button
-                          key={prompt}
+                          key={label}
                           onClick={() => {
                             setDraft(prompt);
+                            setMode(intent as Mode);
                             document.getElementById("chat-message")?.focus();
                           }}
                         >
-                          <span>{prompt}</span>
-                          <ArrowUp size={14} />
+                          <span>{label}</span>
+                          <ChevronRight size={15} />
                         </button>
                       ))}
                     </div>
                   </div>
                 )}
-                {conversation.messages.map((message) => (
-                  <article
-                    className={`message ${message.role}`}
-                    key={message.id}
-                  >
-                    <div className="message-author">
-                      {message.role === "assistant" ? (
-                        <Sparkles size={14} />
-                      ) : (
-                        <MessageSquare size={14} />
-                      )}
-                      {message.role === "assistant" ? "RetailScope AI" : "You"}
-                      {message.model && (
-                        <span className="message-model">{message.model}</span>
-                      )}
-                      {message.scenarioAttached && (
-                        <span className="message-model">Scenario attached</span>
-                      )}
-                    </div>
-                    <div className="markdown">
-                      <Markdown>{message.text}</Markdown>
-                    </div>
-                    {message.sources && message.sources.length > 0 && (
+              {conversation.messages.map((message) => (
+                <article className={`message ${message.role}`} key={message.id}>
+                  <div className="message-author">
+                    {message.role === "assistant" ? (
+                      <Building2 size={15} />
+                    ) : (
+                      <MessageSquare size={15} />
+                    )}{" "}
+                    {message.role === "assistant" ? "RetailScope" : "You"}
+                  </div>
+                  <div className="markdown">
+                    <Markdown>{message.text}</Markdown>
+                  </div>
+                  {Boolean(message.sources?.length) && (
+                    <details className="message-sources">
+                      <summary>{message.sources!.length} sources</summary>
                       <div className="source-links">
-                        <span>Sources</span>
-                        {message.sources.map((source, index) =>
+                        {message.sources!.map((source, index) =>
                           safeUrl(source.url) ? (
                             <a
+                              key={index}
                               href={safeUrl(source.url)}
                               target="_blank"
                               rel="noopener noreferrer"
-                              key={`${source.url}-${index}`}
                             >
-                              <Globe2 size={12} />
+                              <Globe2 size={13} />
                               {source.title}
-                              <ExternalLink size={11} />
                             </a>
                           ) : (
-                            <span key={index}>
-                              {source.title} (link unavailable)
-                            </span>
+                            <span key={index}>{source.title}</span>
                           ),
                         )}
                       </div>
-                    )}
-                  </article>
-                ))}
-                {chatBusyKey === contextKey && (
-                  <div className="chat-pending" role="status">
-                    <LoaderCircle size={16} className="spin" />
-                    Preparing an answer
+                    </details>
+                  )}
+                </article>
+              ))}
+              {progress?.key === activeId && (
+                <>
+                  <ResearchProgress
+                    stage={progress.stage}
+                    startedAt={progress.started}
+                    count={progress.leads.length}
+                  />
+                  {progress.leads.length > 0 && (
+                    <details className="stream-sources">
+                      <summary>
+                        {progress.leads.length} retrieved sources
+                      </summary>
+                      {progress.leads.map((lead) => (
+                        <a
+                          key={lead.id}
+                          href={safeUrl(lead.url)}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                        >
+                          {lead.title}
+                        </a>
+                      ))}
+                    </details>
+                  )}
+                </>
+              )}
+              {busyKey === activeId && !progress && (
+                <p className="chat-pending" role="status">
+                  <LoaderCircle size={16} className="spin" />
+                  Preparing your response
+                </p>
+              )}
+              {conversation.error && <Notice>{conversation.error}</Notice>}
+              {conversation.artifactId && (
+                <button
+                  className="artifact-link"
+                  onClick={() => openArtifact(conversation.artifactId!)}
+                >
+                  <FileText size={20} />
+                  <span>
+                    <strong>Research document</strong>
+                    <small>Analysis, property facts and sources</small>
+                  </span>
+                  <ChevronRight size={17} />
+                </button>
+              )}
+              {agentDraft && agentDraftKey === activeId && (
+                <form className="agent-draft" onSubmit={confirmAgent}>
+                  <header>
+                    <Bot size={19} />
+                    <h2>Review background agent</h2>
+                  </header>
+                  <label>
+                    Name
+                    <input
+                      required
+                      maxLength={80}
+                      value={agentDraft.name || ""}
+                      onChange={(event) =>
+                        setAgentDraft({
+                          ...agentDraft,
+                          name: event.target.value,
+                        })
+                      }
+                    />
+                  </label>
+                  <label>
+                    City
+                    <input
+                      required
+                      value={agentDraft.city || ""}
+                      placeholder="Phoenix, AZ"
+                      onChange={(event) =>
+                        setAgentDraft({
+                          ...agentDraft,
+                          city: event.target.value,
+                        })
+                      }
+                    />
+                  </label>
+                  <div className="budget-fields">
+                    {(["min_price", "max_price"] as const).map((key, index) => (
+                      <label key={key}>
+                        {index ? "Max budget ($M)" : "Min budget ($M)"}
+                        <input
+                          type="number"
+                          required
+                          min={index ? 0.1 : 0}
+                          max={1000}
+                          step="0.1"
+                          value={
+                            agentDraft[key] === undefined
+                              ? ""
+                              : agentDraft[key]! / 1000000
+                          }
+                          onChange={(event) =>
+                            setAgentDraft({
+                              ...agentDraft,
+                              [key]:
+                                event.target.value === ""
+                                  ? undefined
+                                  : Math.round(
+                                      event.target.valueAsNumber * 1000000,
+                                    ),
+                            })
+                          }
+                        />
+                      </label>
+                    ))}
                   </div>
-                )}
-                {conversation.error && <Notice>{conversation.error}</Notice>}
-                <div ref={chatBottom} />
-              </div>
+                  <label>
+                    Strategy
+                    <input
+                      required
+                      value={agentDraft.strategy || ""}
+                      placeholder="Value-add"
+                      onChange={(event) =>
+                        setAgentDraft({
+                          ...agentDraft,
+                          strategy: event.target.value,
+                        })
+                      }
+                    />
+                  </label>
+                  <label>
+                    Schedule
+                    <select
+                      required
+                      value={agentDraft.cadence_hours || ""}
+                      onChange={(event) =>
+                        setAgentDraft({
+                          ...agentDraft,
+                          cadence_hours: event.target.value
+                            ? (Number(event.target.value) as 6 | 12 | 24)
+                            : undefined,
+                        })
+                      }
+                    >
+                      <option value="" disabled>
+                        Choose a schedule
+                      </option>
+                      <option value={6}>Every 6 hours</option>
+                      <option value={12}>Every 12 hours</option>
+                      <option value={24}>Every day</option>
+                    </select>
+                  </label>
+                  <p className="muted">
+                    Scheduled searches use your connected provider credits.
+                    Active until this workspace expires.
+                  </p>
+                  {agentError && <Notice>{agentError}</Notice>}
+                  <div className="form-actions">
+                    <button
+                      className="text-button"
+                      type="button"
+                      disabled={agentSaving}
+                      onClick={() => setAgentDraft(undefined)}
+                    >
+                      Discard
+                    </button>
+                    <button
+                      className="primary-button"
+                      disabled={
+                        agentSaving ||
+                        !agentDraft.cadence_hours ||
+                        !ready ||
+                        (agentDraft.max_price ?? 0) <=
+                          (agentDraft.min_price ?? 0)
+                      }
+                    >
+                      {agentSaving ? (
+                        <LoaderCircle size={15} className="spin" />
+                      ) : (
+                        <Plus size={15} />
+                      )}
+                      Create agent
+                    </button>
+                  </div>
+                </form>
+              )}
+              <div ref={bottom} />
+            </div>
+            <div className="chat-composer-wrap">
+            {scenarios[activeId] && <div className="scenario-attachment"><FileText size={14}/><span>Financial scenario attached</span><button className="icon-button" title="Remove scenario" aria-label="Remove scenario" onClick={()=>setScenarios(current=>({...current,[activeId]:undefined}))}><X size={14}/></button></div>}
+              {promptBankOpen && (
+                <div className="prompt-builder">
+                  <div className="sidebar-heading">
+                    <h2>Search preferences</h2>
+                    <button
+                      className="icon-button"
+                      title="Close preferences"
+                      aria-label="Close preferences"
+                      onClick={() => setPromptBankOpen(false)}
+                    >
+                      <X size={16} />
+                    </button>
+                  </div>
+                  <SearchBuilder value={criteria} onChange={setCriteria} />
+                  <button
+                    className="text-button"
+                    onClick={() => {
+                      setDraft(searchPrompt(criteria));
+                      setMode("research");
+                      setPromptBankOpen(false);
+                    }}
+                  >
+                    Use research prompt
+                    <ChevronRight size={14} />
+                  </button>
+                </div>
+              )}
               <form className="composer" onSubmit={send}>
                 <label className="sr-only" htmlFor="chat-message">
                   Message RetailScope
                 </label>
                 <textarea
                   id="chat-message"
-                  placeholder="Ask about a property, market or research question..."
+                  disabled={
+                    Boolean(busyKey) ||
+                    agentSaving ||
+                    threadLoading ||
+                    conversation.unavailable
+                  }
+                  rows={3}
+                  maxLength={2000}
+                  placeholder="Ask about a property, find leads, or schedule an agent..."
                   value={draft}
                   onChange={(event) => setDraft(event.target.value)}
-                  maxLength={4000}
-                  rows={2}
-                  disabled={
-                    !bootstrapReady || Boolean(chatBusyKey) || threadLoading
-                  }
                   onKeyDown={(event) => {
                     if (
                       event.key === "Enter" &&
@@ -1068,193 +986,69 @@ export default function App() {
                     }
                   }}
                 />
-                {scenarios[contextKey] && (
-                  <label className="scenario-attachment">
-                    <input
-                      type="checkbox"
-                      checked={attached[contextKey] || false}
-                      disabled={Boolean(chatBusyKey)}
-                      onChange={(event) =>
-                        setAttached((current) => ({
-                          ...current,
-                          [contextKey]: event.target.checked,
-                        }))
-                      }
-                    />
-                    Attach calculated scenario
-                  </label>
-                )}
                 <div className="composer-bottom">
-                  <span className="model-label">
-                    <span className="status-dot" />
-                    {providers?.model || "Model unavailable"}
-                  </span>
-                  {chatBusyKey === contextKey ? (
+                  <button
+                    type="button"
+                    className="icon-button"
+                    aria-label="Search preferences"
+                    title="Search preferences"
+                    aria-expanded={promptBankOpen}
+                    onClick={() => setPromptBankOpen((value) => !value)}
+                  >
+                    <SlidersHorizontal size={17} />
+                  </button>
+                  <select
+                    className="composer-mode"
+                    aria-label="Message mode"
+                    value={mode}
+                    onChange={(event) => setMode(event.target.value as Mode)}
+                  >
+                    <option value="auto">Auto</option>
+                    <option value="research">Find leads</option>
+                    <option value="ask">Ask</option>
+                    <option value="schedule">Schedule agent</option>
+                  </select>
+                  <span className="model-label">{providers?.model || ""}</span>
+                  {busyKey ? (
                     <button
                       type="button"
-                      className="send-button"
-                      title="Stop request"
-                      aria-label="Stop request"
+                      className="icon-button"
+                      title="Stop waiting"
+                      aria-label="Stop waiting"
                       onClick={() => {
-                        chatController.current?.abort();
-                        updateConversation(contextKey, (current) => ({
+                        controller.current?.abort();
+                        setBusyKey(undefined);
+                        setProgress(undefined);
+                        updateThread(activeId, (current) => ({
                           ...current,
-                          error: "Request cancelled. No answer was received.",
+                          error:
+                            "Stopped waiting. A submitted search may still finish; its report will appear in Artifacts.",
                         }));
                       }}
                     >
-                      <Square size={15} />
+                      <Square size={17} />
                     </button>
                   ) : (
                     <button
                       className="send-button"
                       type="submit"
-                      title="Send message"
                       aria-label="Send message"
+                      title="Send message"
                       disabled={
-                        !bootstrapReady ||
+                        !ready ||
                         !draft.trim() ||
-                        Boolean(chatBusyKey) ||
-                        threadLoading
+                        threadLoading ||
+                        conversation.unavailable
                       }
                     >
-                      <ArrowUp size={18} />
+                      <ArrowUp size={19} />
                     </button>
                   )}
                 </div>
               </form>
-            </section>
-            <aside
-              hidden={!selected}
-              className={`details-pane pane ${view === "details" ? "mobile-active" : ""}`}
-              aria-label="Selected property"
-            >
-              <div className="pane-heading">
-                <div>
-                  <span className="eyebrow">PROPERTY</span>
-                  <h2>Property details</h2>
-                </div>
-                {selected && (
-                  <button
-                    className="icon-button"
-                    title="Deselect property"
-                    aria-label="Deselect property"
-                    onClick={() => setSelectedId(undefined)}
-                  >
-                    <X size={16} />
-                  </button>
-                )}
-              </div>
-              {selected ? (
-                <div className="property-content">
-                  <div
-                    role="tablist"
-                    aria-label="Property detail view"
-                    className="property-tabs"
-                  >
-                    {(["overview", "scenario"] as const).map((tab) => (
-                      <button
-                        key={tab}
-                        role="tab"
-                        id={`property-tab-${tab}`}
-                        aria-selected={propertyTab === tab}
-                        aria-controls={`property-${tab}`}
-                        tabIndex={propertyTab === tab ? 0 : -1}
-                        onClick={() => setPropertyTab(tab)}
-                        onKeyDown={(event) => {
-                          if (
-                            ["ArrowLeft", "ArrowRight", "Home", "End"].includes(
-                              event.key,
-                            )
-                          ) {
-                            event.preventDefault();
-                            const next =
-                              event.key === "Home"
-                                ? "overview"
-                                : event.key === "End"
-                                  ? "scenario"
-                                  : tab === "overview"
-                                    ? "scenario"
-                                    : "overview";
-                            setPropertyTab(next);
-                            document
-                              .getElementById(`property-tab-${next}`)
-                              ?.focus();
-                          }
-                        }}
-                      >
-                        {tab === "overview" ? "Overview" : "Underwriting"}
-                      </button>
-                    ))}
-                  </div>
-                  <div
-                    id="property-overview"
-                    role="tabpanel"
-                    aria-labelledby="property-tab-overview"
-                    hidden={propertyTab !== "overview"}
-                  >
-                    <LeadDetails lead={selected} />
-                    <button
-                      className="text-button property-chat"
-                      onClick={() => {
-                        setView("chat");
-                        document.getElementById("chat-message")?.focus();
-                      }}
-                    >
-                      <MessageSquare size={15} />
-                      Research this property
-                      <ArrowDown size={14} />
-                    </button>
-                  </div>
-                  <div
-                    id="property-scenario"
-                    role="tabpanel"
-                    aria-labelledby="property-tab-scenario"
-                    hidden={propertyTab !== "scenario"}
-                  >
-                    <h2 className="scenario-property-title">
-                      {selected.title}
-                    </h2>
-                    <ScenarioForm
-                      key={selected.id}
-                      calculated={scenarios[selected.id]}
-                      onCalculated={(scenario) =>
-                        setScenarios((current) => ({
-                          ...current,
-                          [selected.id]: scenario,
-                        }))
-                      }
-                      onInvalidate={() => {
-                        setScenarios((current) => ({
-                          ...current,
-                          [selected.id]: undefined,
-                        }));
-                        setAttached((current) => ({
-                          ...current,
-                          [selected.id]: false,
-                        }));
-                      }}
-                      onAsk={() => {
-                        setAttached((current) => ({
-                          ...current,
-                          [selected.id]: true,
-                        }));
-                        setDraft(
-                          "Interpret this calculated scenario. Which assumptions and risks should I verify?",
-                        );
-                        setView("chat");
-                      }}
-                    />
-                  </div>
-                </div>
-              ) : (
-                <Empty icon={Building2} title="No property selected">
-                  Select a lead to review its details and original source.
-                </Empty>
-              )}
-            </aside>
-          </main>
-        </div>
+            </div>
+          </section>
+        </main>
       </div>
     </div>
   );

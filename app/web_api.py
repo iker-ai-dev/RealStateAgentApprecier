@@ -26,7 +26,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from app.data_access import get_snowflake_config
 from app.live_agent import LiveAgentError
 from app.search_agents import (SearchAgentRequest, AgentToggle, claim_agent, public_agent,
-                              scheduler_key, stamp, utc_now)
+                              scheduler_key, stamp, utc_now, AgentDraftRequest, parse_agent_draft, draft_summary)
 from app.observability import capture_exception, init_sentry
 from app.underwriting import Scenario, calculate_scenario
 from app.workspace_tokens import (browser_signing_key, issue_browser_session,
@@ -341,9 +341,23 @@ def create_app(*, store=None, research_fn=None, analyze_fn=None):
                     agent.update(changes)
         return {"agents": [public_agent(agent) for agent in agents]}
 
+    @app.post("/api/agents/draft")
+    def draft_agent(payload: AgentDraftRequest, request: Request):
+        owner = request.state.owner
+        conversation_id = payload.conversation_id or secrets.token_hex(16)
+        if payload.conversation_id and not (store.messages(owner, conversation_id)
+                                           or store.get_job(owner, conversation_id)):
+            raise HTTPException(404, "Conversation not found.")
+        result = parse_agent_draft(payload.message)
+        store.append_message(owner, conversation_id, "user", payload.message)
+        store.append_message(owner, conversation_id, "assistant", draft_summary(result))
+        return {**result, "conversation_id": conversation_id}
+
     @app.post("/api/agents", status_code=201)
     def create_agent(payload: SearchAgentRequest, request: Request):
         owner = request.state.owner
+        if payload.conversation_id and not store.messages(owner, payload.conversation_id):
+            raise HTTPException(404, "Conversation not found.")
         with agent_config_lock:
             if sum(agent.get("expires_at", "") > stamp(utc_now()) for agent in store.list_agents(owner)) >= 5:
                 raise HTTPException(409, "This workspace supports up to five background agents.")
@@ -354,6 +368,15 @@ def create_app(*, store=None, research_fn=None, analyze_fn=None):
             agent["expires_at"] = stamp(datetime.fromtimestamp(expires_at, timezone.utc))
             if not store.enroll_agent(owner, agent):
                 raise HTTPException(409, "Background agent enrollment is full. Please try again later.")
+        if payload.conversation_id:
+            try:
+                store.append_message(owner, payload.conversation_id, "assistant",
+                                     f"Background agent created. It will search every {agent['cadence_hours']} hours. "
+                                     f"Next scheduled search: {agent['next_run_at']}. "
+                                     "No research has been run yet.")
+            except Exception as exc:
+                # Enrollment already committed; do not encourage a duplicate retry.
+                capture_exception(exc)
         return public_agent(agent)
 
     @app.post("/api/agents/{agent_id}")
@@ -390,7 +413,7 @@ def create_app(*, store=None, research_fn=None, analyze_fn=None):
         try:
             gate.reserve(owner, ip, "research")
             reserved = True
-            job = store.create_job(owner, agent["query"])
+            job = store.create_job(owner, agent["query"], agent_id=agent["id"])
             store.patch_agent(owner, agent["id"], {"last_job_id": job["id"]}, {"run_id": run_id})
             return run_id, job
         except Exception:
@@ -455,6 +478,36 @@ def create_app(*, store=None, research_fn=None, analyze_fn=None):
                                  expected_status=job["status"])
                 job = store.get_job(owner, job_id)
         return {**job, "leads": enrich_leads(job.get("leads", []))}
+
+    def artifact_summary(job):
+        summary = {"id": job["id"], "title": job["query"][:120],
+                   "created_at": job["created_at"], "status": job["status"],
+                   "query": job["query"], "lead_count": len(job.get("leads", [])),
+                   "has_report": job.get("analysis") is not None}
+        # Older scheduled runs stored provenance on their retrieved leads only.
+        agent_ids = {lead.get("agent_id") for lead in job.get("leads", []) if lead.get("agent_id")}
+        agent_id = job.get("agent_id") or (next(iter(agent_ids)) if len(agent_ids) == 1 else None)
+        if agent_id:
+            summary["agent_id"] = agent_id
+        if job.get("error"):
+            summary["error"] = job["error"]
+        return summary
+
+    @app.get("/api/artifacts")
+    def list_artifacts(request: Request):
+        return {"schema_version": 1, "artifacts": [artifact_summary(job)
+                for job in store.list_jobs(request.state.owner)]}
+
+    @app.get("/api/artifacts/{artifact_id}")
+    def get_artifact(artifact_id: str, request: Request):
+        from app.lead_facts import enrich_leads
+        if not re.fullmatch(r"[a-f0-9]{32}", artifact_id):
+            raise HTTPException(404, "Artifact not found.")
+        job = store.get_job(request.state.owner, artifact_id)
+        if job is None or job.get("status") not in {"completed", "partial"}:
+            raise HTTPException(404, "Artifact not found.")
+        return {"schema_version": 1, **artifact_summary(job), "report": job.get("analysis"),
+                "leads": enrich_leads(job.get("leads", []))}
 
     @app.get("/api/research/{job_id}")
     def research_status(job_id: str, request: Request):

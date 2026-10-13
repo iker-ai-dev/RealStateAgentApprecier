@@ -35,7 +35,10 @@ export const cities = [
   "Washington, DC",
 ];
 export const strategies = ["Value-add", "Income", "Redevelopment"];
-export type SearchCriteria = Omit<AgentInput, "name">;
+export type SearchCriteria = Pick<
+  AgentInput,
+  "city" | "min_price" | "max_price" | "strategy"
+>;
 export const defaultCriteria: SearchCriteria = {
   city: "Phoenix, AZ",
   min_price: 1000000,

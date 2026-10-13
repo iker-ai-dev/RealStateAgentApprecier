@@ -1,9 +1,8 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import { Inbox, Pause, Play, Plus, RefreshCw } from "lucide-react";
+import { Pause, Play, Plus, RefreshCw } from "lucide-react";
 import { api, errorMessage, type Agent, type Lead } from "./api";
 import { streamResearch, stageLabel } from "./researchStream";
 import { SearchBuilder, defaultCriteria, searchPrompt } from "./SearchBuilder";
-import { LeadDetails } from "./LeadDetails";
 
 function timestamp(value: string | null) {
   return value ? new Date(value).toLocaleString() : "Not yet";
@@ -17,21 +16,19 @@ export function AgentsWorkspace({
   ready,
   active,
   onOpenReport,
-  onResearchLead,
+  refreshKey = 0,
 }: {
   ready: boolean;
   active: boolean;
   onOpenReport: (id: string) => void;
   onResearchLead: (lead: Lead) => void;
+  refreshKey?: number;
 }) {
   const [agents, setAgents] = useState<Agent[]>([]);
-  const [leads, setLeads] = useState<Lead[]>([]);
-  const [selected, setSelected] = useState<Lead>();
   const [criteria, setCriteria] = useState(defaultCriteria);
   const [name, setName] = useState("");
   const [creating, setCreating] = useState(false);
-  const [filter, setFilter] = useState("all");
-  const [agentFilter, setAgentFilter] = useState("");
+  const [cadence, setCadence] = useState<6 | 12 | 24>(6);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const [started, setStarted] = useState(active);
@@ -41,8 +38,6 @@ export function AgentsWorkspace({
     Record<string, { id: string; status: string }>
   >({});
   const action = useRef<AbortController | null>(null);
-  const reads = useRef(new Map<string, AbortController>());
-  const readIds = useRef(new Set<string>());
   const activeRef = useRef(active);
   activeRef.current = active;
   useEffect(() => {
@@ -51,7 +46,6 @@ export function AgentsWorkspace({
   useEffect(
     () => () => {
       action.current?.abort();
-      reads.current.forEach((controller) => controller.abort());
     },
     [],
   );
@@ -76,16 +70,6 @@ export function AgentsWorkspace({
         ),
       );
     });
-    const inboxRequest = api.leads(controller.signal).then((inbox) => {
-      if (controller.signal.aborted) return;
-      setLeads(
-        inbox.leads.map((lead) =>
-          readIds.current.has(lead.id)
-            ? { ...lead, read_at: lead.read_at || "read" }
-            : lead,
-        ),
-      );
-    });
     let timer: number;
     function scheduleRefresh() {
       timer = window.setTimeout(() => {
@@ -93,7 +77,7 @@ export function AgentsWorkspace({
         else scheduleRefresh();
       }, 30000);
     }
-    Promise.allSettled([tasksRequest, inboxRequest])
+    Promise.allSettled([tasksRequest])
       .then((results) => {
         if (controller.signal.aborted) return;
         const failure = results.find((result) => result.status === "rejected");
@@ -110,7 +94,7 @@ export function AgentsWorkspace({
       controller.abort();
       window.clearTimeout(timer);
     };
-  }, [ready, started, version]);
+  }, [ready, started, version, refreshKey]);
 
   async function perform(
     key: string,
@@ -147,7 +131,7 @@ export function AgentsWorkspace({
       return;
     void perform("create", async (signal) => {
       const agent = await api.createAgent(
-        { ...criteria, name: name.trim() },
+        { ...criteria, name: name.trim(), cadence_hours: cadence },
         signal,
       );
       if (signal.aborted) return;
@@ -171,13 +155,6 @@ export function AgentsWorkspace({
                 status: snapshot.stage || snapshot.status,
               },
             }));
-          if (!signal.aborted && snapshot.leads.length)
-            setLeads((current) => [
-              ...snapshot.leads,
-              ...current.filter(
-                (lead) => !snapshot.leads.some((next) => next.id === lead.id),
-              ),
-            ]);
         });
         if (!signal.aborted && result.error) setError(result.error);
       } catch (reason) {
@@ -190,59 +167,23 @@ export function AgentsWorkspace({
       }
     });
   }
-  async function select(lead: Lead) {
-    setSelected(lead);
-    if (lead.read_at || reads.current.has(lead.id)) return;
-    const controller = new AbortController();
-    reads.current.set(lead.id, controller);
-    try {
-      await api.readLead(lead.id, controller.signal);
-      if (!controller.signal.aborted) {
-        readIds.current.add(lead.id);
-        setLeads((current) =>
-          current.map((item) =>
-            item.id === lead.id ? { ...item, read_at: "read" } : item,
-          ),
-        );
-      }
-    } catch (reason) {
-      if (!controller.signal.aborted) setError(errorMessage(reason));
-    } finally {
-      reads.current.delete(lead.id);
-    }
-  }
-  const unread = leads.filter((lead) => !lead.read_at).length;
   const enrolled = agents.filter((agent) => !expired(agent)).length;
-  const visible = leads
-    .filter(
-      (lead) =>
-        (filter !== "unread" || !lead.read_at) &&
-        (!agentFilter || lead.agent_id === agentFilter),
-    )
-    .sort(
-      (left, right) =>
-        (Date.parse(right.retrieved_at || "") || 0) -
-        (Date.parse(left.retrieved_at || "") || 0),
-    );
   if (!active) return null;
   return (
-    <section
-      className="agents-workspace"
-      aria-label="Background agents and inbox"
-    >
+    <section className="agents-workspace" aria-label="Background agents">
       <div className="agents-heading">
         <div>
           <h1>Background agents</h1>
           <p className="muted">
             {agents.filter((agent) => agent.enabled && !expired(agent)).length}{" "}
-            active / {agents.length} tasks · Every 6 hours
+            active / {agents.length} tasks
           </p>
         </div>
         <div className="agent-actions">
           <button
             className="icon-button"
-            title="Refresh agents and inbox"
-            aria-label="Refresh agents and inbox"
+            title="Refresh agents"
+            aria-label="Refresh agents"
             disabled={loading}
             onClick={() => {
               setError("");
@@ -287,16 +228,27 @@ export function AgentsWorkspace({
             <summary>Prompt preview</summary>
             <p className="prompt-preview">{searchPrompt(criteria)}</p>
           </details>
-          <p className="muted">
-            First run: next 00:17, 06:17, 12:17 or 18:17 UTC.
-          </p>
+          <label>
+            Run cadence
+            <select
+              value={cadence}
+              disabled={Boolean(busy)}
+              onChange={(event) =>
+                setCadence(Number(event.target.value) as 6 | 12 | 24)
+              }
+            >
+              <option value={6}>Every 6 hours</option>
+              <option value={12}>Every 12 hours</option>
+              <option value={24}>Every 24 hours</option>
+            </select>
+          </label>
           <button
             className="primary-button"
             disabled={Boolean(busy) || enrolled >= 5}
             type="submit"
           >
             <Plus size={15} />
-            Save agent
+            Confirm and save agent
           </button>
         </form>
       )}
@@ -324,9 +276,7 @@ export function AgentsWorkspace({
                   : agent.enabled
                     ? "Active"
                     : "Paused"}{" "}
-                · Every {agent.cadence_hours}h ·{" "}
-                {leads.filter((lead) => lead.agent_id === agent.id).length}{" "}
-                results
+                · Every {agent.cadence_hours}h
               </p>
             </div>
             <div className="run-metadata">
@@ -400,94 +350,6 @@ export function AgentsWorkspace({
             </div>
           </article>
         ))}
-      </div>
-      <div className="inbox-heading">
-        <h2>
-          <Inbox size={18} />
-          Inbox{" "}
-          <span className="count">
-            {unread} unread / {leads.length}
-          </span>
-        </h2>
-        <div className="inbox-filters">
-          <label className="sr-only" htmlFor="inbox-read">
-            Read status
-          </label>
-          <select
-            id="inbox-read"
-            value={filter}
-            onChange={(event) => setFilter(event.target.value)}
-          >
-            <option value="all">All results</option>
-            <option value="unread">Unread</option>
-          </select>
-          <label className="sr-only" htmlFor="inbox-agent">
-            Filter by agent
-          </label>
-          <select
-            id="inbox-agent"
-            value={agentFilter}
-            onChange={(event) => setAgentFilter(event.target.value)}
-          >
-            <option value="">All agents</option>
-            {agents.map((agent) => (
-              <option key={agent.id} value={agent.id}>
-                {agent.name}
-              </option>
-            ))}
-          </select>
-        </div>
-      </div>
-      <div className="inbox-layout">
-        <div className="inbox-list" aria-label="Inbox results">
-          {visible.map((lead) => (
-            <button
-              className={`lead-row ${selected?.id === lead.id ? "selected" : ""}`}
-              key={lead.id}
-              aria-pressed={selected?.id === lead.id}
-              onClick={() => void select(lead)}
-            >
-              <h3>{lead.title}</h3>
-              <p className="muted">
-                {lead.location && lead.location !== "unknown"
-                  ? lead.location
-                  : "Location not provided"}{" "}
-                · {lead.read_at ? "Read" : "Unread"}
-              </p>
-            </button>
-          ))}
-          {!loading && !visible.length && (
-            <p className="muted">No matching results.</p>
-          )}
-        </div>
-        <aside
-          className="inbox-details property-content"
-          aria-label="Inbox property"
-        >
-          {selected ? (
-            <>
-              <LeadDetails lead={selected} />
-              <div className="agent-actions">
-                <button
-                  className="text-button"
-                  onClick={() => onResearchLead(selected)}
-                >
-                  Research this property
-                </button>
-                {selected.job_id && (
-                  <button
-                    className="text-button"
-                    onClick={() => onOpenReport(selected.job_id!)}
-                  >
-                    Open report
-                  </button>
-                )}
-              </div>
-            </>
-          ) : (
-            <p className="muted">No property selected</p>
-          )}
-        </aside>
       </div>
     </section>
   );

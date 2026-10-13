@@ -42,7 +42,7 @@ export const agentSchema = z.object({
   max_price: z.number().finite(),
   strategy: z.string(),
   enabled: z.boolean(),
-  cadence_hours: z.literal(6),
+  cadence_hours: z.union([z.literal(6), z.literal(12), z.literal(24)]),
   query: z.string(),
   next_run_at: z.string().nullable(),
   expires_at: z.string(),
@@ -55,7 +55,7 @@ export type Agent = z.infer<typeof agentSchema>;
 export type AgentInput = Pick<
   Agent,
   "name" | "city" | "min_price" | "max_price" | "strategy"
->;
+> & { cadence_hours?: 6 | 12 | 24; conversation_id?: string };
 export const statusSchema = z.object({
   providers: z.object({ snowflake: z.boolean(), nimble: z.boolean() }),
   model: z.string(),
@@ -67,6 +67,23 @@ const analysisSchema = z.object({
   usage: z.unknown().optional(),
   model: z.string().optional(),
 });
+const artifactSummarySchema = z.object({
+  id: z.string(),
+  title: z.string(),
+  created_at: z.string(),
+  status: z.string(),
+  query: z.string(),
+  agent_id: z.string().nullish(),
+  lead_count: z.number().optional(),
+});
+const artifactSchema = artifactSummarySchema.extend({
+  schema_version: z.literal(1),
+  report: analysisSchema.nullable(),
+  leads: z.array(leadSchema),
+  error: z.string().nullish(),
+});
+export type ArtifactSummary = z.infer<typeof artifactSummarySchema>;
+export type Artifact = z.infer<typeof artifactSchema>;
 export const researchSchema = z.object({
   id: z.string(),
   status: z.string(),
@@ -185,6 +202,50 @@ async function request<S extends z.ZodTypeAny>(
 }
 
 export const api = {
+  agentDraft: async (
+    message: string,
+    conversationId?: string,
+    signal?: AbortSignal,
+  ) => {
+    const result = await request(
+      "/agents/draft",
+      z.object({
+        draft: z.object({
+          name: z.string().nullable(),
+          city: z.string().nullable(),
+          min_price: z.number().nullable(),
+          max_price: z.number().nullable(),
+          strategy: z.string().nullable(),
+          cadence_hours: z
+            .union([z.literal(6), z.literal(12), z.literal(24)])
+            .nullable(),
+        }),
+        message: z.string(),
+        conversation_id: z.string(),
+        missing_fields: z.array(z.string()),
+        warnings: z.array(z.string()),
+      }),
+      signal,
+      {
+        message,
+        ...(conversationId ? { conversation_id: conversationId } : {}),
+      },
+    );
+    return {
+      ...result,
+      draft: Object.fromEntries(
+        Object.entries(result.draft).filter(([, value]) => value !== null),
+      ) as Partial<AgentInput>,
+    };
+  },
+  artifacts: (signal?: AbortSignal) =>
+    request(
+      "/artifacts",
+      z.object({ artifacts: z.array(artifactSummarySchema) }),
+      signal,
+    ),
+  artifact: (id: string, signal?: AbortSignal) =>
+    request(`/artifacts/${encodeURIComponent(id)}`, artifactSchema, signal),
   agents: (signal?: AbortSignal) =>
     request("/agents", z.object({ agents: z.array(agentSchema) }), signal),
   createAgent: (body: AgentInput, signal?: AbortSignal) =>
