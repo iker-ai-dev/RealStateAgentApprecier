@@ -277,6 +277,8 @@ def create_app(*, store=None, research_fn=None, analyze_fn=None):
                         parameters = {}
                     if "on_progress" in parameters:
                         kwargs["on_progress"] = on_progress
+                    if "mode" in parameters:
+                        kwargs["mode"] = "research"
                     report = analyze_fn("Analyze these leads for this acquisition search: " + query,
                                         found, **kwargs)
                     if time.monotonic() >= deadline:
@@ -589,9 +591,10 @@ def create_app(*, store=None, research_fn=None, analyze_fn=None):
     @app.post("/api/chat")
     def chat(payload: ChatRequest, request: Request):
         owner = request.state.owner
-        selected = store.list_leads(owner)
+        selected = []
+        research_run = None
         if payload.lead_id:
-            selected = [lead for lead in selected if lead["id"] == payload.lead_id]
+            selected = [lead for lead in store.list_leads(owner) if lead["id"] == payload.lead_id]
             if not selected:
                 raise HTTPException(404, "Lead not found in this workspace.")
         elif payload.conversation_id:
@@ -600,16 +603,27 @@ def create_app(*, store=None, research_fn=None, analyze_fn=None):
             research_run = store.get_job(owner, payload.conversation_id)
             if research_run and research_run.get('status') in ('completed', 'partial'):
                 selected = research_run.get('leads', [])
-            else:
-                selected = selected[-10:]
-        else:
-            selected = selected[-10:]
         gate.reserve(owner, request.client.host if request.client else "unknown", "chat")
         conversation_id = payload.conversation_id or secrets.token_hex(16)
         try:
+            messages = store.messages(owner, conversation_id)
+            if not payload.lead_id and research_run is None:
+                # Reuse only this conversation's cited, owner-visible sources.
+                # Ordinary conversation must not inherit workspace inventory.
+                source_urls = {source['url'] for item in messages if item['role'] == 'assistant'
+                               for source in item.get('sources', [])}
+                if source_urls:
+                    selected = [lead for lead in store.list_leads(owner) if lead['url'] in source_urls]
             history = [{"role": item["role"], "content": item["content"][:3000]}
-                       for item in store.messages(owner, conversation_id)[-8:]]
+                       for item in messages[-8:]]
             kwargs = {"history": history}
+            # Legacy injected analyzers need not implement conversational mode.
+            try:
+                parameters = inspect.signature(analyze_fn).parameters
+            except (TypeError, ValueError):
+                parameters = {}
+            if "mode" in parameters:
+                kwargs["mode"] = "chat"
             if payload.scenario:
                 kwargs["scenario"] = calculate_scenario(payload.scenario)
             result = analyze_fn(payload.message, selected[:10], **kwargs)

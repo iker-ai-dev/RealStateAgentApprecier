@@ -49,6 +49,129 @@ async function send(text: string) {
 }
 
 describe("chat-first workspace", () => {
+  it("preserves a near-limit draft when filters exceed the payload limit and allows retry without filters", async () => {
+    const research = vi.spyOn(api, "research").mockResolvedValue({ id: "r1", status: "queued" });
+    const chat = vi.spyOn(api, "chat");
+    const schedule = vi.spyOn(api, "agentDraft");
+    vi.spyOn(streams, "streamResearch").mockResolvedValue({ id: "r1", status: "completed", leads: [] });
+    const draft = "Find retail properties. " + "x".repeat(1976);
+    expect(draft).toHaveLength(2000);
+    render(<App />);
+    fireEvent.click(screen.getByRole("checkbox", { name: "Search filters: Off" }));
+    await send(draft);
+    expect(await screen.findByRole("alert")).toHaveTextContent("Shorten your message or turn off search filters");
+    expect(screen.getByLabelText("Message RetailScope")).toHaveValue(draft);
+    expect(screen.getByRole("button", { name: "Send message" })).toBeEnabled();
+    expect(screen.queryByRole("button", { name: "Stop waiting" })).toBeNull();
+    expect(screen.queryByRole("article")).toBeNull();
+    expect(research).not.toHaveBeenCalled();
+    expect(chat).not.toHaveBeenCalled();
+    expect(schedule).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("checkbox", { name: "Search filters: On" }));
+    fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() => expect(research).toHaveBeenCalledWith(draft, expect.any(AbortSignal)));
+    await waitFor(() => expect(screen.getByRole("button", { name: "New chat" })).toBeEnabled());
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("shows a single Chats control above history and keeps research filters off by default", async () => {
+    render(<App />);
+    await screen.findByText("Workspace connected");
+    const sidebar = screen.getByLabelText("Workspace sidebar");
+    expect(within(sidebar).getAllByText("Chats")).toHaveLength(1);
+    expect(within(sidebar).queryByText("Conversations")).toBeNull();
+    expect(within(screen.getByRole("navigation", { name: "Main workspace" })).getAllByRole("button")).toHaveLength(2);
+    expect(screen.getByRole("checkbox", { name: "Search filters: Off" })).not.toBeChecked();
+    fireEvent.click(screen.getByRole("button", { name: "Artifacts" }));
+    fireEvent.click(screen.getByRole("button", { name: "Chats" }));
+    expect(screen.getByRole("region", { name: "Research chat" })).toBeVisible();
+  });
+
+  it.each([false, true])("applies preferences to fresh research only when enabled=%s", async (enabled) => {
+    const research = vi.spyOn(api, "research").mockResolvedValue({ id: "r1", status: "queued" });
+    vi.spyOn(streams, "streamResearch").mockResolvedValue({ id: "r1", status: "completed", leads: [] });
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: "Search preferences" }));
+    fireEvent.change(screen.getByLabelText("US city"), { target: { value: "Austin, TX" } });
+    fireEvent.change(screen.getByLabelText("Min budget ($M)"), { target: { value: "2" } });
+    fireEvent.change(screen.getByLabelText("Strategy"), { target: { value: "Income" } });
+    fireEvent.click(screen.getByRole("button", { name: "Close preferences" }));
+    if (enabled) {
+      fireEvent.click(screen.getByRole("checkbox", { name: "Search filters: Off" }));
+      expect(screen.getByText("Research only: Austin, TX · $2M to $10M · Income")).toBeVisible();
+    }
+    await send("Find retail properties");
+    await waitFor(() => expect(research).toHaveBeenCalledOnce());
+    const query = research.mock.calls[0][0];
+    if (enabled) {
+      expect(query).toContain("Austin, TX");
+      expect(query).toContain("$2 million");
+      expect(query).toContain("income opportunities");
+    } else expect(query).toBe("Find retail properties");
+    await waitFor(() => expect(screen.getByRole("button", { name: "New chat" })).toBeEnabled());
+  });
+
+  it.each(["hi", "What risks should I verify?"])("keeps %s in free chat even with filters enabled", async (message) => {
+    const chat = vi.spyOn(api, "chat").mockResolvedValue({ conversation_id: "c1", answer: "Chat reply", sources: [] });
+    const research = vi.spyOn(api, "research");
+    const schedule = vi.spyOn(api, "agentDraft");
+    render(<App />);
+    fireEvent.click(screen.getByRole("checkbox", { name: "Search filters: Off" }));
+    await send(message);
+    await screen.findByText("Chat reply");
+    expect(chat).toHaveBeenCalledWith({ message }, expect.any(AbortSignal));
+    expect(research).not.toHaveBeenCalled();
+    expect(schedule).not.toHaveBeenCalled();
+  });
+
+  it("never applies research filters to a schedule draft", async () => {
+    const schedule = vi.spyOn(api, "agentDraft").mockResolvedValue({ draft: {}, message: "Review schedule", conversation_id: "s1", missing_fields: ["city"], warnings: [] });
+    render(<App />);
+    fireEvent.click(screen.getByRole("checkbox", { name: "Search filters: Off" }));
+    await send("Monitor retail properties daily");
+    await screen.findByText("Review schedule");
+    expect(schedule).toHaveBeenCalledWith("Monitor retail properties daily", undefined, expect.any(AbortSignal));
+  });
+
+  it.each(["Find shopping centers", "Schedule a background agent", "Use research prompt"])("routes an edited %s suggestion naturally", async (suggestion) => {
+    const chat = vi.spyOn(api, "chat").mockResolvedValue({ conversation_id: "c1", answer: "Hello there", sources: [] });
+    const research = vi.spyOn(api, "research");
+    const schedule = vi.spyOn(api, "agentDraft");
+    render(<App />);
+    if (suggestion === "Use research prompt") fireEvent.click(screen.getByRole("button", { name: "Search preferences" }));
+    fireEvent.click(screen.getByRole("button", { name: suggestion }));
+    expect(screen.getByLabelText("Message mode")).toHaveValue("auto");
+    if (suggestion !== "Schedule a background agent") expect(screen.getByRole("checkbox", { name: "Search filters: On" })).toBeChecked();
+    await send("hi");
+    await screen.findByText("Hello there");
+    expect(chat).toHaveBeenCalledWith({ message: "hi" }, expect.any(AbortSignal));
+    expect(research).not.toHaveBeenCalled();
+    expect(schedule).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])("keeps generated prompts synchronized without doubled or disabled filters (disabled=%s)", async (disabled) => {
+    const research = vi.spyOn(api, "research").mockResolvedValue({ id: "r1", status: "queued" });
+    vi.spyOn(streams, "streamResearch").mockResolvedValue({ id: "r1", status: "completed", leads: [] });
+    render(<App />);
+    await screen.findByText("Workspace connected");
+    fireEvent.click(screen.getByRole("button", { name: "Find shopping centers" }));
+    fireEvent.click(screen.getByRole("button", { name: "Search preferences" }));
+    fireEvent.change(screen.getByLabelText("US city"), { target: { value: "Austin, TX" } });
+    fireEvent.click(screen.getByRole("button", { name: "Close preferences" }));
+    if (disabled) fireEvent.click(screen.getByRole("checkbox", { name: "Search filters: On" }));
+    const prompt = (screen.getByLabelText("Message RetailScope") as HTMLTextAreaElement).value;
+    await send(`${prompt}\nPrefer corner lots.`);
+    await waitFor(() => expect(research).toHaveBeenCalledOnce());
+    const query = research.mock.calls[0][0];
+    expect(query).not.toContain("Phoenix");
+    expect(query).not.toContain("Search filters:");
+    if (disabled) {
+      expect(query).toBe("Find retail properties.\nPrefer corner lots.");
+      expect(screen.queryByText(/Research only:/)).toBeNull();
+    } else expect(query.match(/Austin, TX/g)).toHaveLength(1);
+    await waitFor(() => expect(screen.getByRole("button", { name: "New chat" })).toBeEnabled());
+  });
+
   it("keeps late chat replies in their thread without leaving Artifacts", async () => {
     let finish!: (result: any) => void;
     vi.spyOn(api, "chat").mockImplementation(
@@ -383,7 +506,8 @@ describe("chat-first workspace", () => {
       (screen.getByLabelText("Message RetailScope") as HTMLTextAreaElement)
         .value,
     ).toContain("Austin, TX");
-    expect(screen.getByLabelText("Message mode")).toHaveValue("research");
+    expect(screen.getByLabelText("Message mode")).toHaveValue("auto");
+    expect(screen.getByRole("checkbox", { name: "Search filters: On" })).toBeChecked();
   });
   it("offers a new empty conversation without deleting previous history", async () => {
     vi.spyOn(api, "chat").mockResolvedValue({
@@ -397,7 +521,7 @@ describe("chat-first workspace", () => {
     fireEvent.click(screen.getByRole("button", { name: "New chat" }));
     expect(screen.queryByText("Retained answer")).not.toBeInTheDocument();
     expect(window.location.search).toBe("");
-    expect(screen.getByText("What should we research?")).toBeVisible();
+    expect(screen.getByText("What can I help with?")).toBeVisible();
   });
   it("surfaces MCP token errors without showing unusable installation commands", async () => {
     vi.spyOn(api, "mcpToken").mockRejectedValue(
@@ -423,6 +547,24 @@ it("routes explicit research and scheduling requests and respects a manual mode"
   );
   expect(messageIntent("Which risks need more research?", "auto")).toBe("ask");
   expect(messageIntent("Explain what background agents do", "ask")).toBe("ask");
+});
+it.each([
+  "how do background agents work?",
+  "what should I watch out for?",
+  "watch a movie",
+  "Can you watch a movie?",
+  "Explain daily property monitoring",
+  "hi",
+])("keeps conversational intent in Chat: %s", (message) => {
+  expect(messageIntent(message, "auto")).toBe("ask");
+});
+it.each([
+  "Please monitor retail properties daily",
+  "Can you create a background agent?",
+  "Schedule a weekly search",
+  "Watch shopping centers in Phoenix every 12 hours",
+])("recognizes explicit schedule intent: %s", (message) => {
+  expect(messageIntent(message, "auto")).toBe("schedule");
 });
 it("renders safe markdown without raw HTML or remote tracking images", () => {
   const { container } = render(

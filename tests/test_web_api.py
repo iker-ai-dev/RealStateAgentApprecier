@@ -1,9 +1,10 @@
+import json
 import tempfile
 import time
 import unittest
 import os
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from fastapi.testclient import TestClient
 
@@ -82,15 +83,74 @@ class WorkspaceApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(self.calls[-1][1], [self.lead])
 
-    def test_ad_hoc_chat_prefers_recent_sources(self):
+    def test_new_chat_does_not_inherit_unrelated_workspace_sources(self):
         self.client.get('/api/status')
         owner = verify_browser_session(self.client.cookies.get('retailscope_session'), browser_signing_key())
         self.store.upsert_leads(owner, [dict(self.lead, id=f'old-{i}') for i in range(10)])
         self.store.upsert_leads(owner, [self.lead])
-        response = self.client.post('/api/chat', json={'message': 'Current evidence?'})
+        response = self.client.post('/api/chat', json={'message': 'hello'})
         self.assertEqual(response.status_code, 200)
-        self.assertIn(self.lead, self.calls[-1][1])
-        self.assertEqual(len(self.calls[-1][1]), 10)
+        self.assertEqual(self.calls[-1][1], [])
+        followup = self.client.post('/api/chat', json={
+            'message': 'Can we talk about something else?', 'conversation_id': response.json()['conversation_id']})
+        self.assertEqual(followup.status_code, 200)
+        self.assertEqual(self.calls[-1][1], [])
+        self.assertEqual(len(self.calls[-1][2]), 2)
+
+    def test_non_job_followup_reuses_only_previously_cited_owner_visible_sources(self):
+        self.client.get('/api/status')
+        owner = verify_browser_session(self.client.cookies.get('retailscope_session'), browser_signing_key())
+        unrelated = dict(self.lead, id='unrelated', url='https://example.com/unrelated')
+        foreign = dict(self.lead, id='foreign', url='https://example.com/foreign')
+        self.store.upsert_leads(owner, [self.lead, unrelated])
+        self.store.upsert_leads('another-owner', [foreign])
+        cid = 'a' * 32
+        self.store.append_message(owner, cid, 'user', 'Explain the selected listing.')
+        self.store.append_message(owner, cid, 'assistant', 'Saved grounded answer.', metadata={
+            'sources': [{'title': lead['title'], 'url': lead['url']} for lead in [self.lead, foreign]]})
+        # A later greeting with empty citations must not erase cited context.
+        self.store.append_message(owner, cid, 'assistant', 'Hello!', metadata={'sources': []})
+        response = self.client.post('/api/chat', json={'message': 'Explain that further.', 'conversation_id': cid})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.calls[-1][1], [self.lead])
+
+    def test_real_agent_chat_mode_in_saved_research_thread_and_strict_research_mode(self):
+        from app import live_agent
+
+        provider = Mock(spec=live_agent.AnalysisProvider)
+        report = {'paragraphs': [{'kind': 'unknown', 'text': 'The leases are not supplied.',
+                                 'source_ids': [], 'quotes': [], 'metric_refs': []}]}
+        reply = 'Hi! What would you like to talk about?'
+        conversation = {'paragraphs': [{'kind': 'conversation', 'text': reply,
+                                       'source_ids': [], 'quotes': [], 'metric_refs': []}]}
+        provider.complete.side_effect = [live_agent.Completion(report, {}, live_agent.DEFAULT_MODEL),
+                                        live_agent.Completion(conversation, {'total_tokens': 20}, live_agent.DEFAULT_MODEL)]
+        app = create_app(store=self.store, research_fn=lambda query: [self.lead])
+        with patch.object(live_agent, 'CortexProvider', return_value=provider), TestClient(app) as client:
+            job = client.post('/api/research', json={'query': 'Retail evidence'}).json()
+            for _ in range(100):
+                result = client.get('/api/research/' + job['id']).json()
+                if result['status'] not in ('queued', 'running'):
+                    break
+                time.sleep(0.01)
+            self.assertEqual(result['status'], 'completed')
+            self.assertIn('Basis:', result['analysis']['answer'])
+            response = client.post('/api/chat', json={'message': 'hi', 'conversation_id': job['id']})
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json()['answer'], reply)
+            self.assertEqual(response.json()['sources'], [])
+            self.assertEqual(response.json()['usage'], {'total_tokens': 20})
+            messages = client.get('/api/conversations/' + job['id']).json()['messages']
+            self.assertEqual(messages[-1]['content'], reply)
+            self.assertEqual(len(messages), 4)
+        research_call, chat_call = provider.complete.call_args_list
+        kinds = lambda call: call.args[1]['schema']['properties']['paragraphs']['items']['properties']['kind']['enum']
+        self.assertNotIn('conversation', kinds(research_call))
+        self.assertIn('conversation', kinds(chat_call))
+        data = json.loads(chat_call.args[0].split('\nINPUT_DATA=', 1)[1])
+        self.assertEqual(data['message'], 'hi')
+        self.assertEqual(data['EVIDENCE'][0]['id'], self.lead['id'])
+        self.assertIn('Basis:', data['history'][-1]['content'])
 
     def test_no_sample_leads_on_new_workspace(self):
         response = self.client.get("/api/leads")

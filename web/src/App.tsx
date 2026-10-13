@@ -59,9 +59,8 @@ export function messageIntent(
 ): Exclude<Mode, "auto"> {
   if (mode !== "auto") return mode;
   if (
-    /\b(schedule|monitor|watch|background agent|every\s+(?:\d+|six|twelve|twenty.four)\s+hours?|daily)\b/i.test(
-      message,
-    )
+    /^(?:(?:please|can you|could you|would you|i want to|i'd like to)\s+)*(?:schedule|monitor|watch|create|set up|start)\b/i.test(message.trim()) &&
+    /\b(properties|property|centers?|centres?|malls?|leads|listings|retail|search|background agent)\b/i.test(message)
   )
     return "schedule";
   if (
@@ -133,6 +132,8 @@ export default function App() {
   const [agentError, setAgentError] = useState("");
   const [agentSaving, setAgentSaving] = useState(false);
   const [criteria, setCriteria] = useState(defaultCriteria);
+  const [filtersEnabled, setFiltersEnabled] = useState(false);
+  const [generatedPrompt, setGeneratedPrompt] = useState<string>();
   const [promptBankOpen, setPromptBankOpen] = useState(false);
   const controller = useRef<AbortController | null>(null);
   const bottom = useRef<HTMLDivElement>(null);
@@ -305,9 +306,18 @@ export default function App() {
       conversation.unavailable
     )
       return;
-    const message = draft.trim(),
-      intent = messageIntent(message, mode),
-      pending = new AbortController();
+    const intent = messageIntent(draft.trim(), mode);
+    const message = intent === "research" && filtersEnabled && !(generatedPrompt && draft.includes(generatedPrompt))
+      ? `${draft.trim()}\n\nSearch filters:\n${searchPrompt(criteria)}`
+      : draft.trim();
+    if (message.length > 2000) {
+      updateThread(activeId, (current) => ({
+        ...current,
+        error: `Your message with any search filters is ${message.length} characters; the limit is 2000. Shorten your message or turn off search filters, then send again. Your draft has been kept.`,
+      }));
+      return;
+    }
+    const pending = new AbortController();
     let key = activeId;
     controller.current = pending;
     setMode("auto");
@@ -526,7 +536,6 @@ export default function App() {
           <nav aria-label="Main workspace">
             {(
               [
-                ["chats", MessageSquare, "Chats"],
                 ["artifacts", FileText, "Artifacts"],
                 ["agents", Bot, "Agents"],
               ] as const
@@ -545,7 +554,13 @@ export default function App() {
             ))}
           </nav>
           <div className="sidebar-heading">
-            <span>Conversations</span>
+            <button
+              className="chats-heading-button"
+              aria-current={section === "chats" ? "page" : undefined}
+              onClick={() => { setSection("chats"); setSidebarOpen(false); }}
+            >
+              <MessageSquare size={16} />Chats
+            </button>
             <button
               className="icon-button"
               title="Refresh conversations"
@@ -677,7 +692,7 @@ export default function App() {
                     <span className="chat-emblem">
                       <Building2 size={28} />
                     </span>
-                    <h2>What should we research?</h2>
+                    <h2>What can I help with?</h2>
                     <div className="suggestions">
                       {[
                         [
@@ -700,7 +715,9 @@ export default function App() {
                           key={label}
                           onClick={() => {
                             setDraft(prompt);
-                            setMode(intent as Mode);
+                            setMode("auto");
+                            setGeneratedPrompt(intent === "research" ? prompt : undefined);
+                            if (intent === "research") setFiltersEnabled(true);
                             document.getElementById("chat-message")?.focus();
                           }}
                         >
@@ -931,6 +948,25 @@ export default function App() {
               <div ref={bottom} />
             </div>
             <div className="chat-composer-wrap">
+              <div className="search-filter-controls">
+                <label className="search-filter-toggle">
+                  <input
+                    type="checkbox"
+                    checked={filtersEnabled}
+                    onChange={(event) => {
+                      setFiltersEnabled(event.target.checked);
+                      if (!event.target.checked && generatedPrompt && draft.includes(generatedPrompt)) {
+                        setDraft(draft.replace(generatedPrompt, "Find retail properties."));
+                        setGeneratedPrompt(undefined);
+                      }
+                    }}
+                  />
+                  Search filters: {filtersEnabled ? "On" : "Off"}
+                </label>
+                {filtersEnabled && <span className="search-filter-summary">
+                  Research only: {criteria.city} · ${criteria.min_price / 1000000}M to ${criteria.max_price / 1000000}M · {criteria.strategy}
+                </span>}
+              </div>
             {scenarios[activeId] && <div className="scenario-attachment"><FileText size={14}/><span>Financial scenario attached</span><button className="icon-button" title="Remove scenario" aria-label="Remove scenario" onClick={()=>setScenarios(current=>({...current,[activeId]:undefined}))}><X size={14}/></button></div>}
               {promptBankOpen && (
                 <div className="prompt-builder">
@@ -945,12 +981,22 @@ export default function App() {
                       <X size={16} />
                     </button>
                   </div>
-                  <SearchBuilder value={criteria} onChange={setCriteria} />
+                  <SearchBuilder value={criteria} onChange={(next) => {
+                    setCriteria(next);
+                    if (generatedPrompt && draft.includes(generatedPrompt)) {
+                      const prompt = searchPrompt(next);
+                      setDraft(draft.replace(generatedPrompt, prompt));
+                      setGeneratedPrompt(prompt);
+                    }
+                  }} />
                   <button
                     className="text-button"
                     onClick={() => {
-                      setDraft(searchPrompt(criteria));
-                      setMode("research");
+                      const prompt = searchPrompt(criteria);
+                      setDraft(prompt);
+                      setGeneratedPrompt(prompt);
+                      setFiltersEnabled(true);
+                      setMode("auto");
                       setPromptBankOpen(false);
                     }}
                   >
@@ -1006,7 +1052,7 @@ export default function App() {
                   >
                     <option value="auto">Auto</option>
                     <option value="research">Find leads</option>
-                    <option value="ask">Ask</option>
+                    <option value="ask">Chat</option>
                     <option value="schedule">Schedule agent</option>
                   </select>
                   <span className="model-label">{providers?.model || ""}</span>
