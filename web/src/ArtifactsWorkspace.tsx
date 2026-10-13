@@ -4,6 +4,7 @@ import {
   api,
   errorMessage,
   displayTitle,
+  preferredProperty,
   safeUrl,
   type Artifact,
   type ArtifactSummary,
@@ -47,6 +48,7 @@ export function ArtifactsWorkspace({
   const [cache, setCache] = useState<Record<string, Artifact>>({});
   const [localId, setLocalId] = useState<string>();
   const [sourceIds, setSourceIds] = useState<Record<string, string>>({});
+  const [propertyIds, setPropertyIds] = useState<Record<string, string>>({});
   const [scenarios, setScenarios] = useState<
     Record<string, CalculatedScenario | undefined>
   >({});
@@ -109,7 +111,9 @@ export function ArtifactsWorkspace({
     artifact?.leads.find((lead) => lead.id === sourceIds[artifact.id]) ??
     artifact?.leads[0];
   const refresh = () => setVersion((value) => value + 1);
-  const scenarioKey = JSON.stringify([artifact?.id, selectedLead?.id]);
+  const sourceKey = JSON.stringify([artifact?.id, selectedLead?.id]);
+  const selectedProperty = selectedLead?.properties?.find((property) => property.id === propertyIds[sourceKey]) ?? preferredProperty(selectedLead);
+  const scenarioKey = selectedProperty ? JSON.stringify([artifact?.id, selectedLead?.id, selectedProperty.id]) : sourceKey;
   return (
     <section
       className="artifacts-workspace"
@@ -292,6 +296,7 @@ export function ArtifactsWorkspace({
                         }
                       >
                         {lead.title}
+                        {Boolean(lead.properties?.length) && <small className="source-property-count">{lead.properties!.length} properties</small>}
                       </button>
                     ))}
                   </div>
@@ -301,7 +306,7 @@ export function ArtifactsWorkspace({
                   >
                     {selectedLead && (
                       <>
-                        <LeadDetails lead={selectedLead} />
+                        <LeadDetails lead={selectedLead} selectedPropertyId={selectedProperty?.id} onPropertySelect={(id) => setPropertyIds((current) => ({ ...current, [sourceKey]: id }))} />
                         <details
                           className="artifact-scenario"
                           key={scenarioKey}

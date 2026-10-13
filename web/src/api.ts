@@ -19,6 +19,14 @@ export const factKeys = [
   "median_household_income",
 ] as const;
 
+export const sourcePropertySchema = z.object({
+  id: z.string(),
+  title: z.string(),
+  url: z.string(),
+  summary: z.string(),
+  facts: z.record(z.enum(factKeys), factSchema),
+});
+
 export const leadSchema = z.object({
   id: z.string(),
   title: z.string(),
@@ -32,8 +40,15 @@ export const leadSchema = z.object({
   job_id: z.string().nullish(),
   read_at: z.string().nullish(),
   facts: z.record(z.enum(factKeys), factSchema).nullish(),
+  properties: z.array(sourcePropertySchema).optional(),
 });
 export type Lead = z.infer<typeof leadSchema>;
+export function preferredProperty(lead?: Lead) {
+  return lead?.properties?.find((property) => factKeys.some((key) => {
+    const fact = property.facts[key];
+    return fact?.status === "source_reported" && fact.value !== null && Number.isFinite(fact.value);
+  })) ?? lead?.properties?.[0];
+}
 export const agentSchema = z.object({
   id: z.string(),
   name: z.string(),

@@ -67,6 +67,24 @@ beforeEach(() => {
 });
 
 describe("ArtifactsWorkspace", () => {
+  it("keeps financial scenario inputs separate for properties in the same source", async () => {
+    vi.mocked(api.artifact).mockResolvedValue({
+      ...document,
+      leads: [{ ...document.leads[0], properties: [
+        { id: "a", title: "University Ave", url: "https://example.org/first", summary: "University listing", facts: {} },
+        { id: "b", title: "Kettner Blvd", url: "https://example.org/first", summary: "Kettner listing", facts: {} },
+      ] }],
+    });
+    render(<ArtifactsWorkspace {...props} selectedId="report1" />);
+    await screen.findByRole("combobox", { name: "Property from source" });
+    fireEvent.click(screen.getByText("Financial scenario"));
+    fireEvent.change(screen.getByLabelText(/Purchase price/), { target: { value: "6000000" } });
+    fireEvent.change(screen.getByRole("combobox", { name: "Property from source" }), { target: { value: "b" } });
+    fireEvent.click(screen.getByText("Financial scenario"));
+    expect(screen.getByLabelText(/Purchase price/)).toHaveValue(null);
+    expect(screen.getByRole("heading", { name: "Kettner Blvd" })).toBeVisible();
+  });
+
   it("rejects mismatched document IDs without replacing a cached report", async () => {
     const { rerender } = render(
       <ArtifactsWorkspace {...props} selectedId="report1" />,

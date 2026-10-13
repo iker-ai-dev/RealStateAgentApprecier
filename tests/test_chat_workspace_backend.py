@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import json
 import tempfile
 import time
 import unittest
@@ -89,6 +90,35 @@ class ArtifactApiTests(unittest.TestCase):
         self.addCleanup(self.client.__exit__, None, None, None)
         self.client.get("/api/status")
         self.owner = verify_browser_session(self.client.cookies.get("retailscope_session"), browser_signing_key())
+
+    def test_saved_directory_artifact_exposes_separate_properties_without_research(self):
+        excerpt = json.dumps({"mainEntity": {"itemListElement": [
+            {"name": "6172-6196 University Ave, San Diego, CA 92115",
+             "description": "20,934 SF Retail Building Offered at $6,000,000 at a 7.25% Cap Rate in San Diego, CA 92115"},
+            {"name": "2483 Kettner Blvd, San Diego, CA 92101",
+             "description": "1,610 SF Retail Building Offered at $1,050,000 in San Diego, CA 92101"},
+        ]}})
+        lead = dict(self.lead, title="Strip Malls for Sale in San Diego County, CA",
+                    url="https://www.loopnet.com/search/strip-malls/san-diego-county-ca/for-sale/",
+                    snippet=excerpt, summary=excerpt)
+        job = self.store.create_job(self.owner, "San Diego shopping centers")
+        self.store.update_job(self.owner, job["id"], "completed", leads=[lead])
+        response = self.client.get("/api/artifacts/" + job["id"])
+        self.assertEqual(response.status_code, 200)
+        saved_source = response.json()["leads"][0]
+        self.assertIsNone(saved_source["facts"]["asking_price"]["value"])
+        first, second = saved_source["properties"]
+        self.assertEqual(first["facts"]["asking_price"]["value"], 6000000)
+        self.assertEqual(first["facts"]["area_sqft"]["value"], 20934)
+        self.assertEqual(first["facts"]["cap_rate"]["value"], 7.25)
+        self.assertEqual(second["facts"]["asking_price"]["value"], 1050000)
+        self.assertEqual(second["facts"]["area_sqft"]["value"], 1610)
+        self.assertIsNone(second["facts"]["cap_rate"]["value"])
+        self.assertNotEqual(first["id"], second["id"])
+        self.assertEqual(self.client.get("/api/artifacts/" + job["id"]).json()["leads"], [saved_source])
+        self.assertNotIn("properties", self.store.get_job(self.owner, job["id"])["leads"][0])
+        self.research.assert_not_called()
+        self.analyze.assert_not_called()
 
     def test_artifacts_are_persisted_owned_history_not_workspace_leads(self):
         report = {"answer": "Stored answer", "sources": []}

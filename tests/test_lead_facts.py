@@ -48,6 +48,8 @@ class LeadFactsTests(unittest.TestCase):
             ("Asking price: $2 million", "asking_price", 2000000),
             ("$2.25M asking price", "asking_price", 2250000),
             ("Listing price USD 2,500,000", "asking_price", 2500000),
+            ("Retail building offered at $2,500,000", "asking_price", 2500000),
+            ("[Listing details](https://broker.example/info) Asking price $2m", "asking_price", 2000000),
             ("Asking price: $2,000,000, cap rate: 6.25%", "asking_price", 2000000),
             ("Building: 15,000 square feet", "area_sqft", 15000),
             ("GLA: 15,000 sq. ft.", "area_sqft", 15000),
@@ -125,6 +127,19 @@ class LeadFactsTests(unittest.TestCase):
             self.assert_unknown(fact)
         result = facts("Asking price $2m; Cap rate 6%")
         self.assert_unknown(result["annual_noi"])
+
+    def test_offered_at_rental_periods_and_legitimate_sale_context(self):
+        for text in ("Retail building offered at $2,500 monthly",
+                     "Retail building for lease offered at $2,500",
+                     "Retail building offered at $2,500 for rent",
+                     "Asking price $2500 per month", "Offered at $2500/year"):
+            self.assert_unknown(facts(text)["asking_price"])
+        for text in ("Fully leased retail building offered at $2m",
+                     "Retail building Offered at $2m; annual rent income $120000",
+                     "Offered at $2m with long-term leases",
+                     "Offered at $2m; Asking rent $2500/month",
+                     "Offered at $2m with rent roll available"):
+            self.assertEqual(facts(text)["asking_price"]["value"], 2000000, text)
 
     def test_ranges_qualifiers_and_malformed_numbers_are_unknown(self):
         cases = ["$2m-$3m", "$2 to $3 million", "$2m / $3m", "$2m or $3m",
