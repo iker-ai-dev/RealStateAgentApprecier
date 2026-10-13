@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { Inbox, Pause, Play, Plus, RefreshCw } from "lucide-react";
-import { api, errorMessage, pollResearch, type Agent, type Lead } from "./api";
+import { api, errorMessage, type Agent, type Lead } from "./api";
+import { streamResearch, stageLabel } from "./researchStream";
 import { SearchBuilder, defaultCriteria, searchPrompt } from "./SearchBuilder";
 import { LeadDetails } from "./LeadDetails";
 
@@ -161,12 +162,22 @@ export function AgentsWorkspace({
       if (signal.aborted) return;
       setRuns((current) => ({ ...current, [agent.id]: job }));
       try {
-        const result = await pollResearch(job.id, signal, (status) => {
+        const result = await streamResearch(job.id, signal, (snapshot) => {
           if (!signal.aborted)
             setRuns((current) => ({
               ...current,
-              [agent.id]: { id: job.id, status },
+              [agent.id]: {
+                id: job.id,
+                status: snapshot.stage || snapshot.status,
+              },
             }));
+          if (!signal.aborted && snapshot.leads.length)
+            setLeads((current) => [
+              ...snapshot.leads,
+              ...current.filter(
+                (lead) => !snapshot.leads.some((next) => next.id === lead.id),
+              ),
+            ]);
         });
         if (!signal.aborted && result.error) setError(result.error);
       } catch (reason) {
@@ -202,11 +213,17 @@ export function AgentsWorkspace({
   }
   const unread = leads.filter((lead) => !lead.read_at).length;
   const enrolled = agents.filter((agent) => !expired(agent)).length;
-  const visible = leads.filter(
-    (lead) =>
-      (filter !== "unread" || !lead.read_at) &&
-      (!agentFilter || lead.agent_id === agentFilter),
-  );
+  const visible = leads
+    .filter(
+      (lead) =>
+        (filter !== "unread" || !lead.read_at) &&
+        (!agentFilter || lead.agent_id === agentFilter),
+    )
+    .sort(
+      (left, right) =>
+        (Date.parse(right.retrieved_at || "") || 0) -
+        (Date.parse(left.retrieved_at || "") || 0),
+    );
   if (!active) return null;
   return (
     <section
@@ -324,7 +341,9 @@ export function AgentsWorkspace({
               </span>
               <span>Expires: {timestamp(agent.expires_at)}</span>
               <span role="status">
-                {runs[agent.id]?.status || agent.last_status || "Not run yet"}
+                {stageLabel(
+                  runs[agent.id]?.status || agent.last_status || "Not run yet",
+                )}
               </span>
               {agent.last_error && (
                 <span className="error-text">{agent.last_error}</span>
@@ -430,8 +449,10 @@ export function AgentsWorkspace({
             >
               <h3>{lead.title}</h3>
               <p className="muted">
-                {lead.location || "Location unknown"} ·{" "}
-                {lead.read_at ? "Read" : "Unread"}
+                {lead.location && lead.location !== "unknown"
+                  ? lead.location
+                  : "Location not provided"}{" "}
+                · {lead.read_at ? "Read" : "Unread"}
               </p>
             </button>
           ))}

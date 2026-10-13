@@ -583,6 +583,7 @@ svg {
   color: var(--cyan);
 }
 .chat-history {
+  min-width: 0;
   flex: 1;
   overflow-y: auto;
   min-height: 0;
@@ -1656,7 +1657,23 @@ select:focus-visible {
   gap: 28px;
 }
 .inbox-details {
+  min-width: 0;
   border-left: 1px solid var(--line);
+}
+.research-progress {
+  padding: 18px 0;
+  border-bottom: 1px solid var(--line);
+  font-size: 13px;
+  color: var(--cyan);
+}
+.research-progress > div {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.research-progress p {
+  margin: 8px 0 0;
+  line-height: 1.6;
 }
 .inbox-list {
   max-height: 700px;

@@ -12,19 +12,36 @@ const labels: Record<(typeof factKeys)[number], string> = {
   median_household_income: "Median household income",
 };
 export function LeadDetails({ lead }: { lead: Lead }) {
+  const provided = (value?: string | null) =>
+    value && !["unknown", "n/a", "none"].includes(value.toLowerCase())
+      ? value
+      : undefined;
+  const knownCount = factKeys.filter(
+    (key) =>
+      lead.facts?.[key]?.status === "source_reported" &&
+      lead.facts[key].value !== null,
+  ).length;
   return (
     <div className="lead-details">
       <span className="property-status">
-        {lead.property_type || lead.status || "Source lead"}
+        {provided(lead.property_type) ||
+          provided(lead.status) ||
+          "Research source"}
       </span>
       <h2>{lead.title}</h2>
-      {lead.location && (
+      {provided(lead.location) && (
         <p className="property-location">
           <MapPin size={14} />
           {lead.location}
         </p>
       )}
       <h3>Source-reported facts</h3>
+      {!knownCount && (
+        <p className="muted">
+          This source does not provide extractable property metrics. It may be
+          background research rather than a property listing.
+        </p>
+      )}
       <dl className="fact-grid">
         {factKeys.map((key) => {
           const fact = lead.facts?.[key];
@@ -45,7 +62,7 @@ export function LeadDetails({ lead }: { lead: Lead }) {
                     <small>{fact.unit}</small>
                   </>
                 ) : (
-                  "Unknown"
+                  "Not provided"
                 )}
               </dd>
               {known &&

@@ -67,12 +67,15 @@ const analysisSchema = z.object({
   usage: z.unknown().optional(),
   model: z.string().optional(),
 });
-const researchSchema = z.object({
+export const researchSchema = z.object({
   id: z.string(),
   status: z.string(),
   leads: z.array(leadSchema).default([]),
   error: z.string().nullish(),
   analysis: analysisSchema.nullish(),
+  stage: z.string().nullish(),
+  started_at: z.string().nullish(),
+  updated_at: z.string().nullish(),
 });
 export type ResearchResult = z.infer<typeof researchSchema>;
 const chatSchema = z.object({
@@ -282,6 +285,7 @@ export async function pollResearch(
   onStatus: (status: string) => void,
   interval = 2000,
   attempts = 45,
+  onUpdate?: (result: ResearchResult) => void,
 ): Promise<ResearchResult> {
   for (let attempt = 0; attempt < attempts; attempt++) {
     if (signal.aborted) throw new DOMException("Cancelled", "AbortError");
@@ -289,6 +293,7 @@ export async function pollResearch(
     if (result.id !== id)
       throw new Error("Research response belongs to a different job.");
     onStatus(result.status);
+    onUpdate?.(result);
     const status = result.status.toLowerCase();
     if (
       [

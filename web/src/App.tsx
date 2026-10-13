@@ -25,7 +25,6 @@ import {
 import {
   api,
   errorMessage,
-  pollResearch,
   safeUrl,
   type CalculatedScenario,
   type ChatResult,
@@ -40,6 +39,8 @@ import { ScenarioForm } from "./ScenarioForm";
 import { SearchBuilder, defaultCriteria, searchPrompt } from "./SearchBuilder";
 import { LeadDetails } from "./LeadDetails";
 import { AgentsWorkspace } from "./AgentsWorkspace";
+import { streamResearch, stageLabel } from "./researchStream";
+import { ResearchProgress } from "./ResearchProgress";
 
 type Message = {
   id: string;
@@ -114,6 +115,8 @@ export default function App() {
   const [query, setQuery] = useState(searchPrompt(defaultCriteria));
   const [researchStatus, setResearchStatus] = useState("");
   const [researchBusy, setResearchBusy] = useState(false);
+  const [researchStartedAt, setResearchStartedAt] = useState(0);
+  const [researchSourceCount, setResearchSourceCount] = useState(0);
   const [researchError, setResearchError] = useState("");
   const [researchFinished, setResearchFinished] = useState(false);
   const [view, setView] = useState<View>("chat");
@@ -323,6 +326,8 @@ export default function App() {
     const pending = requestSignal(controller.signal, 330_000);
     const signal = pending.signal;
     setResearchBusy(true);
+    setResearchStartedAt(Date.now());
+    setResearchSourceCount(0);
     setResearchFinished(false);
     setResearchError("");
     setResearchStatus("Submitting");
@@ -331,9 +336,35 @@ export default function App() {
         ? { id: existingId, status: "Loading report" }
         : await api.research(query.trim(), signal);
       setResearchStatus(job.status);
+      if (!existingId && !signal.aborted) {
+        setSelectedId(undefined);
+        setRestoreId(null);
+        setSection("chat");
+        setView("chat");
+        threadUrl(job.id);
+        updateConversation("__general__", () => ({
+          id: job.id,
+          messages: [
+            { id: `${job.id}-brief`, role: "user", text: query.trim() },
+          ],
+        }));
+      }
       const result =
         savedReports.current.get(job.id) ??
-        (await pollResearch(job.id, signal, setResearchStatus));
+        (await streamResearch(job.id, signal, (snapshot) => {
+          if (signal.aborted) return;
+          setResearchStatus(snapshot.stage || snapshot.status);
+          setResearchSourceCount(snapshot.leads.length);
+          if (
+            snapshot.started_at &&
+            Number.isFinite(Date.parse(snapshot.started_at))
+          )
+            setResearchStartedAt(Date.parse(snapshot.started_at));
+          if (snapshot.leads.length) {
+            setLeads(snapshot.leads);
+            setLeadsError("");
+          }
+        }));
       if (!controller.signal.aborted) {
         if (result.status.toLowerCase() === "completed")
           savedReports.current.set(job.id, result);
@@ -347,14 +378,15 @@ export default function App() {
         );
         if (partial) {
           setResearchError(result.error || "");
-          setView("leads");
+          setView("chat");
+          if (existingId) updateConversation("__general__", () => savedThreads.current.get(job.id) || { id: job.id, messages: [] });
         }
         setFilter("");
         if (!partial && result.analysis) {
           updateConversation(
             "__general__",
             () =>
-              savedThreads.current.get(job.id) ?? {
+              (existingId && savedThreads.current.get(job.id)) || {
                 id: job.id,
                 messages: [
                   ...(!existingId
@@ -701,7 +733,7 @@ export default function App() {
                 <div className="progress" role="status">
                   <LoaderCircle size={16} className="spin" />
                   <span>
-                    Researching <b>{researchStatus.replaceAll("_", " ")}</b>
+                    <b>{stageLabel(researchStatus)}</b>
                   </span>
                 </div>
               )}
@@ -712,11 +744,6 @@ export default function App() {
                     <span>{researchStatus}</span>
                   </div>
                 )}
-              {researchError && (
-                <Notice onRetry={() => setLeadsVersion((value) => value + 1)}>
-                  {researchError}
-                </Notice>
-              )}
               {leadsError && (
                 <Notice onRetry={() => setLeadsVersion((value) => value + 1)}>
                   {leadsError}
@@ -905,10 +932,14 @@ export default function App() {
                 aria-live="polite"
               >
                 {researchBusy && (
-                  <div className="chat-pending" role="status">
-                    <LoaderCircle size={16} className="spin" />
-                    {researchStatus.replaceAll("_", " ")}
-                  </div>
+                  <ResearchProgress
+                    stage={researchStatus}
+                    startedAt={researchStartedAt}
+                    count={researchSourceCount}
+                  />
+                )}
+                {!researchBusy && researchError && (
+                  <Notice>{researchError}</Notice>
                 )}
                 {historyError && (
                   <Notice
