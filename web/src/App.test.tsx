@@ -106,6 +106,47 @@ describe("workspace", () => {
       screen.queryByText("Source-grounded answer"),
     ).not.toBeInTheDocument();
   });
+  it("shows partial research sources and warning without inventing an answer, and allows follow-up", async () => {
+    const warning = "Sources were saved, but the AI analysis could not be verified. You can inspect the sources or ask a follow-up question.";
+    vi.spyOn(api, "research").mockResolvedValue({ id: "job1", status: "queued" });
+    const result = vi.spyOn(api, "researchResult").mockResolvedValue({
+      id: "job1",
+      status: "partial",
+      leads: [{ id: "lead1", title: "Saved source", url: "https://example.org/property" }],
+      error: warning,
+    });
+    const chat = vi.spyOn(api, "chat").mockResolvedValue({
+      answer: "Verified follow-up",
+      sources: [],
+      conversation_id: "follow-up1",
+    });
+    render(<App />);
+    await screen.findByText("Your next opportunity starts here");
+    fireEvent.change(screen.getByLabelText("Research brief"), {
+      target: { value: "Phoenix properties" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Find leads" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(warning);
+    expect(screen.getByRole("status")).toHaveTextContent("Sources saved; analysis unavailable");
+    expect(screen.getByRole("button", { name: "Find leads" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Refresh leads" })).toBeEnabled();
+    expect(screen.getByLabelText("Research brief")).toBeEnabled();
+    expect(screen.queryByRole("button", { name: "Cancel" })).not.toBeInTheDocument();
+    expect(screen.queryAllByRole("article")).toHaveLength(0);
+    expect(chat).not.toHaveBeenCalled();
+    expect(result).toHaveBeenCalledOnce();
+    fireEvent.click(screen.getByRole("button", { name: /Saved source/ }));
+    expect(screen.getByRole("link", { name: "Open original source" })).toHaveAttribute("href", "https://example.org/property");
+    fireEvent.change(screen.getByLabelText("Message RetailScope"), {
+      target: { value: "What should I verify?" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+    await screen.findByText("Verified follow-up");
+    expect(chat).toHaveBeenCalledWith(
+      { message: "What should I verify?", lead_id: "lead1" },
+      expect.any(AbortSignal),
+    );
+  });
   it("keeps ad hoc chat independent and surfaces failures", async () => {
     const chat = vi
       .spyOn(api, "chat")

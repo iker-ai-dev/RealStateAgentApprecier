@@ -311,9 +311,16 @@ export default function App() {
         setLeadsError("");
         setSelectedId(undefined);
         setResearchFinished(true);
-        setResearchStatus("Completed");
+        const partial = result.status.toLowerCase() === "partial";
+        setResearchStatus(
+          partial ? "Sources saved; analysis unavailable" : "Completed",
+        );
+        if (partial) {
+          setResearchError(result.error || "");
+          setView("leads");
+        }
         setFilter("");
-        if (result.analysis) {
+        if (!partial && result.analysis) {
           updateConversation("__general__", (current) => ({
             ...current,
             id: current.id ?? job.id,
@@ -598,6 +605,12 @@ export default function App() {
                   </span>
                 </div>
               )}
+              {!researchBusy && researchFinished &&
+                researchStatus === "Sources saved; analysis unavailable" && (
+                  <div className="progress" role="status">
+                    <span>{researchStatus}</span>
+                  </div>
+                )}
               {researchError && (
                 <Notice onRetry={() => setLeadsVersion((value) => value + 1)}>
                   {researchError}

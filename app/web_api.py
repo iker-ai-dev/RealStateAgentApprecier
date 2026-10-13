@@ -209,14 +209,28 @@ def create_app(*, store=None, research_fn=None, analyze_fn=None):
             if time.monotonic() >= deadline:
                 raise TimeoutError("Research exceeded its execution deadline.")
             if found:
-                report = analyze_fn("Analyze these leads for this acquisition search: " + query,
-                                    found, history=None)
-                if time.monotonic() >= deadline:
-                    raise TimeoutError("Research exceeded its execution deadline.")
                 current = store.get_job(owner, job_id)
                 if current is None or current["status"] != "running":
                     return
+                # Retrieved evidence is useful even if inference fails. Persist
+                # it independently; never substitute an unverified AI answer.
                 store.upsert_leads(owner, found)
+                store.update_job(owner, job_id, "running", leads=found, expected_status="running")
+                try:
+                    report = analyze_fn("Analyze these leads for this acquisition search: " + query,
+                                        found, history=None)
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError("Research exceeded its execution deadline.")
+                except Exception as exc:
+                    capture_exception(exc)
+                    store.update_job(owner, job_id, "partial", leads=found,
+                                     error="Sources were saved, but the AI analysis could not be verified. "
+                                           "You can inspect the sources or ask a follow-up question.",
+                                     expected_status="running")
+                    return
+                current = store.get_job(owner, job_id)
+                if current is None or current["status"] != "running":
+                    return
                 store.append_message(owner, job_id, "user", query)
                 store.append_message(owner, job_id, "assistant", report["answer"],
                                      metadata={key: report[key] for key in ("sources", "model", "usage") if key in report})

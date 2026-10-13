@@ -93,6 +93,30 @@ class WorkspaceApiTests(unittest.TestCase):
         self.assertAlmostEqual(response.json()["irr"], 0.1)
         self.assertEqual(self.client.post("/api/scenarios", json={}).status_code, 422)
 
+    def test_research_preserves_sources_when_analysis_fails(self):
+        def fail(*args, **kwargs):
+            raise RuntimeError("private-provider-response")
+
+        app = create_app(store=self.store, research_fn=lambda query: [self.lead], analyze_fn=fail)
+        with TestClient(app) as client:
+            client.get('/api/status')
+            job = client.post('/api/research', json={'query': 'Phoenix redevelopment'}).json()
+            for _ in range(100):
+                result = client.get('/api/research/' + job['id']).json()
+                if result['status'] not in ('queued', 'running'):
+                    break
+                time.sleep(0.01)
+            self.assertEqual(result['status'], 'partial')
+            self.assertEqual(result['leads'], [self.lead])
+            self.assertIn('Sources were saved', result['error'])
+            self.assertNotIn('private-provider', result['error'])
+            self.assertFalse(result.get('analysis'))
+            self.assertEqual(client.get('/api/leads').json()['leads'], [self.lead])
+            self.assertEqual(client.get('/api/conversations').json()['conversations'], [])
+            other = TestClient(app)
+            self.assertEqual(other.get('/api/leads').json()['leads'], [])
+            self.assertEqual(other.get('/api/research/' + job['id']).status_code, 404)
+
     def test_paid_calls_are_bounded_even_when_cookie_changes(self):
         gate = UsageGate()
         for i in range(20):
