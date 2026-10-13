@@ -156,6 +156,13 @@ export function safeUrl(value?: string): string | undefined {
   }
 }
 
+export function displayTitle(value: string): string {
+  const place = value.replace(/^Research (?:for me )?open-air shopping centers and strip centers for sale in /i, "");
+  if (place === value) return value;
+  const market = place.split(/, United States|\s+with\s+|\s+from\s+/i)[0].trim().replace(/,$/, "");
+  return market ? `${market} · Retail research` : value;
+}
+
 async function request<S extends z.ZodTypeAny>(
   path: string,
   schema: S,

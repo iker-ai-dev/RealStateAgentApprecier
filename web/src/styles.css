@@ -51,8 +51,10 @@
   border-radius: 6px;
   color: var(--muted);
 }
-.workspace-sidebar button:hover,
-.workspace-sidebar button[aria-current="page"] {
+.workspace-sidebar nav button:hover,
+.conversation-menu button:hover,
+.workspace-sidebar nav button[aria-current="page"],
+.conversation-menu button[aria-current="page"] {
   background: #242b2c;
   color: var(--mint);
 }
