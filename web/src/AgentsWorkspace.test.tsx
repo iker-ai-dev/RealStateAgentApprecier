@@ -2,6 +2,12 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { api, type Agent } from "./api";
 import { AgentsWorkspace } from "./AgentsWorkspace";
+import { streamResearch } from "./researchStream";
+
+vi.mock("./researchStream", async (original) => ({
+  ...(await original<typeof import("./researchStream")>()),
+  streamResearch: vi.fn(),
+}));
 
 const agent: Agent = {
   id: "agent1",
@@ -74,4 +80,16 @@ it("refreshes after a chat creates an agent and opens its artifact", async () =>
   fireEvent.click(screen.getByRole("button", { name: "Open report" }));
   expect(props.onOpenReport).toHaveBeenCalledWith("artifact1");
   expect(api.leads).not.toHaveBeenCalled();
+});
+
+it("does not show the previous failure while a new run is in progress", async () => {
+  vi.mocked(api.agents).mockResolvedValue({ agents: [{ ...agent,
+    last_status: "partial", last_error: "Previous analysis failed" }] });
+  vi.mocked(streamResearch).mockImplementation(() => new Promise(() => {}));
+  const { unmount } = render(<AgentsWorkspace {...props} />);
+  await screen.findByText("Previous analysis failed");
+  fireEvent.click(screen.getByRole("button", { name: "Run now" }));
+  await waitFor(() => expect(streamResearch).toHaveBeenCalled());
+  expect(screen.queryByText("Previous analysis failed")).toBeNull();
+  unmount();
 });

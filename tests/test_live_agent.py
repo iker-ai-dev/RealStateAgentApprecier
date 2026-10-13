@@ -25,6 +25,27 @@ def analysis():
 
 
 class LiveAgentTests(unittest.TestCase):
+    def test_repair_receives_all_paragraph_failures_and_static_diagnostics(self):
+        response = analysis()
+        response['paragraphs'][0]['text'] = 'The listing asks $5,000,000.'
+        response['paragraphs'][2]['text'] = 'Request trailing 12-month statements for 1427 Bell Road.'
+        self.provider.complete.side_effect = [agent.Completion(response, {}, agent.DEFAULT_MODEL),
+                                             agent.Completion(analysis(), {}, agent.DEFAULT_MODEL)]
+        with patch.object(agent, 'record_validation') as diagnostics:
+            self.run_analysis()
+        prompt = self.provider.complete.call_args.args[0]
+        self.assertIn('ALL_PARAGRAPH_FAILURES=', prompt)
+        self.assertIn('"paragraph": 1', prompt)
+        self.assertIn('"paragraph": 3', prompt)
+        self.assertIn('Paragraph 3: Numeric model claims', prompt)
+        self.assertIn('5000000', prompt)
+        self.assertIn('1427', prompt)
+        self.assertIn('12', prompt)
+        self.assertEqual(self.provider.complete.call_count, 2)
+        self.assertEqual(diagnostics.call_args_list, [
+            unittest.mock.call(1, 'rejected', 'numeric_provenance'),
+            unittest.mock.call(2, 'passed')])
+
     def test_saved_job_rounding_failure_has_targeted_private_repair_feedback(self):
         leads = copy.deepcopy(LEADS)
         leads[0]['summary'] = 'Historical source-reported sale: $2,985,000, 5.72% cap rate; another sale 9.39%.'
@@ -492,7 +513,8 @@ class LiveAgentTests(unittest.TestCase):
             self.assertEqual(transaction['spans'][0]['description'], 'Snowflake Cortex ai_complete')
             logs = [log for envelope in sink.envelopes for item in envelope.items if item.type == 'log'
                     for log in item.payload.json['items']]
-            self.assertEqual(len(logs), 2)
+            self.assertEqual(len(logs), 3)
+            self.assertEqual(sum(log['body'] == obs.VALIDATION_MESSAGE for log in logs), 1)
             self.assertTrue(all(log['trace_id'] == transaction['contexts']['trace']['trace_id'] for log in logs))
             raw = b''.join(envelope.serialize() for envelope in sink.envelopes)
             for private in (CANARY, LEADS[0]['url'], LEADS[0]['summary'], 'INPUT_DATA'):

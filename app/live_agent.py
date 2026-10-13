@@ -22,7 +22,7 @@ from typing import Any, Callable, Protocol, TypedDict
 from urllib.parse import urlsplit
 
 from app.data_access import get_snowflake_config, get_snowpark_session
-from app.observability import record_cortex_usage, start_agent_transaction, start_span
+from app.observability import record_cortex_usage, record_validation, start_agent_transaction, start_span
 
 MAX_LEADS = 20
 MAX_RESPONSE_BYTES = 64_000
@@ -34,9 +34,10 @@ NUMBER = re.compile(r"(?P<sign>[+-]?)(?P<currency>\$?)(?P<number>\d[\d,]*(?:\.\d
 class LiveAgentError(RuntimeError):
     """Static, public failure reason without provider payloads or credentials."""
 
-    def __init__(self, message: str, *, repair_hint: str = ''):
+    def __init__(self, message: str, *, repair_hint: str = '', reason: str = 'validation_unknown'):
         super().__init__(message)
         self.repair_hint = repair_hint
+        self.reason = reason
 
 
 @dataclass(frozen=True)
@@ -273,6 +274,10 @@ prices into millions; preserve the source's precision and notation.
 Discuss the user's budget qualitatively as the requested budget, not as a sourced
 property fact. Do not infer vacancy from a missing cap rate. Historical sales and
 market reports do not establish current listing availability or achievable returns.
+Keep diligence requests qualitative: ask for recent operating statements rather
+than inventing a numeric lookback period. Each paragraph stands alone for citations:
+an address or figure cited in an earlier paragraph is not supported in a later
+paragraph unless that later paragraph also cites its actual supporting source.
 This rule includes street-address digits, ordinal street names, and dates: put
 the exact supporting substring in that paragraph's quotes or omit the digits.
 Copy quotes literally from summaries, including whitespace. Never complete a
@@ -339,7 +344,7 @@ def _validate_conversation_claims(text: str, paragraph_index: int) -> None:
             or (_FINANCIAL_TOPIC.search(normalized) and _CONVERSATION_FINANCIAL_SCALE.search(normalized))):
         raise LiveAgentError(
             f"Paragraph {paragraph_index + 1}: Conversation contains a property-specific assertion "
-            "or financial quantity; use a grounded paragraph kind.",
+            "or financial quantity; use a grounded paragraph kind.", reason='conversation_claim',
             repair_hint="Use analysis with exact cited evidence for property facts or backend metric_refs "
             "for scenario results. Write financial quantities as exact supported numeric values, not "
             "written-out amounts or rates. Do not merely relabel an unsupported assertion as recommendation "
@@ -436,9 +441,36 @@ def _prepare_evidence(state: State) -> dict[str, Any]:
 
 
 def _validate_citations(state: State) -> dict[str, Any]:
+    """Report all paragraph failures to the single repair call, not just the first."""
+    try:
+        return _validate_citations_once(state)
+    except LiveAgentError as first:
+        completion = state.get('completion')
+        paragraphs = (completion.analysis.get('paragraphs')
+                      if isinstance(completion, Completion) and isinstance(completion.analysis, dict) else None)
+        if (first.reason in {'response_schema', 'paragraph_count', 'completion_type', 'completion_metadata'}
+                or not isinstance(paragraphs, list) or not 1 <= len(paragraphs) <= 12):
+            raise
+        failures = []
+        for index, paragraph in enumerate(paragraphs):
+            isolated = dict(state, completion=Completion(
+                {'paragraphs': [paragraph]}, completion.usage, completion.model))
+            try:
+                _validate_citations_once(isolated, paragraph_offset=index)
+            except LiveAgentError as error:
+                failures.append({'paragraph': index + 1, 'reason': error.reason,
+                                 'instruction': str(error), 'detail': error.repair_hint})
+        raise LiveAgentError(str(first), reason=first.reason,
+                             repair_hint=first.repair_hint + '\nALL_PARAGRAPH_FAILURES=' + json.dumps(failures) +
+                             '\nFix every listed paragraph in one response. Prefer concise qualitative prose '
+                             'when a number is unnecessary or unsupported. Do not spell out unsupported '
+                             'amounts, move claims between paragraphs, or add unrelated citations to evade checks.') from None
+
+
+def _validate_citations_once(state: State, *, paragraph_offset: int = 0) -> dict[str, Any]:
     completion = state["completion"]
     if not isinstance(completion, Completion):
-        raise LiveAgentError("Invalid analysis completion.")
+        raise LiveAgentError("Invalid analysis completion.", reason='completion_type')
     try:
         from jsonschema import validate
         # Generation offers exact excerpts; validation still accepts any exact
@@ -450,31 +482,32 @@ def _validate_citations(state: State) -> dict[str, Any]:
             has_summaries=any(item['summary'].strip() for item in state['evidence']),
             has_scenario=state.get('scenario') is not None, mode=state.get('mode', 'research'))['schema'])
     except Exception:
-        raise LiveAgentError("Model analysis did not match the required response schema.") from None
+        raise LiveAgentError("Model analysis did not match the required response schema.", reason='response_schema') from None
     paragraphs = completion.analysis["paragraphs"]
     if not 1 <= len(paragraphs) <= 12:
-        raise LiveAgentError("Invalid analysis paragraph count.")
+        raise LiveAgentError("Invalid analysis paragraph count.", reason='paragraph_count')
+    indexed_paragraphs = list(enumerate(paragraphs, start=paragraph_offset))
     if state.get('mode', 'research') == 'research':
-        paragraphs = sorted(paragraphs, key=lambda paragraph: paragraph['kind'] != 'recommendation')
+        indexed_paragraphs.sort(key=lambda item: item[1]['kind'] != 'recommendation')
     evidence = {lead["id"]: lead for lead in state["evidence"]}
     used, rendered = [], []
-    for paragraph_index, paragraph in enumerate(paragraphs):
+    for paragraph_index, paragraph in indexed_paragraphs:
         text = _text(paragraph["text"], 6000, "analysis paragraph")
         source_ids, quotes = paragraph["source_ids"], paragraph["quotes"]
         metric_refs = paragraph.get('metric_refs', [])
         conversational = paragraph['kind'] == 'conversation'
         if conversational and (source_ids or quotes or metric_refs):
-            raise LiveAgentError("Conversation paragraphs cannot carry research citations or scenario metrics; use a grounded paragraph kind.")
+            raise LiveAgentError("Conversation paragraphs cannot carry research citations or scenario metrics; use a grounded paragraph kind.", reason='conversation_citations')
         if conversational:
             _validate_conversation_claims(text, paragraph_index)
         if len(source_ids) > MAX_LEADS or len(quotes) > MAX_LEADS:
-            raise LiveAgentError("Too many citations in analysis.")
+            raise LiveAgentError("Too many citations in analysis.", reason='citation_limit')
         if len(set(source_ids)) != len(source_ids) or any(source_id not in evidence for source_id in source_ids):
-            raise LiveAgentError("Model cited an unknown or duplicate source.")
+            raise LiveAgentError("Model cited an unknown or duplicate source.", reason='citation_source')
         if len(metric_refs) > 50 or any(ref not in state['scenario_metrics'] for ref in metric_refs):
-            raise LiveAgentError("Model referenced a metric not supplied by backend code.")
+            raise LiveAgentError("Model referenced a metric not supplied by backend code.", reason='metric_reference')
         if paragraph["kind"] == "analysis" and not metric_refs and (not source_ids or not quotes):
-            raise LiveAgentError("Factual analysis requires cited evidence quotations.")
+            raise LiveAgentError("Factual analysis requires cited evidence quotations.", reason='missing_evidence')
         supported_numbers = set()
         def numbers(value):
             # Ordered-list indices are formatting, not asserted financial metrics.
@@ -494,12 +527,12 @@ def _validate_citations(state: State) -> dict[str, Any]:
         for quote in quotes:
             option = _quote_options(state['evidence']).get(quote['quote'])
             if option is not None and option['source_id'] != quote['source_id']:
-                raise LiveAgentError("Model quotation belongs to a different source.")
+                raise LiveAgentError("Model quotation belongs to a different source.", reason='quotation_source')
             excerpt = _text(option['quote'] if option else quote["quote"], 1200, "evidence quotation")
             source_id = quote["source_id"]
             if (len(excerpt.strip()) < 8 or source_id not in source_ids or excerpt not in evidence[source_id]["summary"]):
                 raise LiveAgentError(f"Paragraph {paragraph_index + 1}: Model quotation is not present in cited evidence. "
-                                     "Copy a shorter exact substring from the cited summary; do not complete truncated text.")
+                                     "Copy a shorter exact substring from the cited summary; do not complete truncated text.", reason='quotation_mismatch')
             supported_numbers.update(numbers(excerpt))
         for source_id in source_ids:
             # Numeric provenance belongs to the cited source, not just the short
@@ -513,13 +546,13 @@ def _validate_citations(state: State) -> dict[str, Any]:
             raise LiveAgentError(f"Paragraph {paragraph_index + 1}: Numeric model claims must come from cited evidence "
                                  "or referenced backend metrics. Include address/date numbers in this paragraph's "
                                  "exact source quotes, or remove those numbers.",
-                                 repair_hint='Unsupported numeric tokens in this paragraph: ' +
+                                 reason='numeric_provenance', repair_hint='Unsupported numeric tokens in this paragraph: ' +
                                  json.dumps(sorted(str(value) + unit for value, unit in unsupported)) +
                                  '. Replace rounded or abbreviated figures with exact cited source values. '
                                  'Omit unsupported claims; describe requested budget qualitatively. '
                                  'Never add citations merely because a source contains a matching number.')
         if re.search(r"https?://|www\.|\[[^\]]*\]|<[^>]*>", text, re.IGNORECASE):
-            raise LiveAgentError("Model must use host-generated citations, not links or markup.")
+            raise LiveAgentError("Model must use host-generated citations, not links or markup.", reason='host_markup')
         if conversational:
             rendered.append(text)
             continue
@@ -533,7 +566,7 @@ def _validate_citations(state: State) -> dict[str, Any]:
             label = 'Scenario analysis (user assumptions)'
         rendered.append(f"{label}: {text}" + (" " + citations if citations else ""))
     if type(completion.model) is not str or not MODEL_ID.fullmatch(completion.model):
-        raise LiveAgentError("Invalid completion model metadata.")
+        raise LiveAgentError("Invalid completion model metadata.", reason='completion_metadata')
     counts = (f"{len(evidence)} supplied leads; "
               f"{len({lead['url'] for lead in evidence.values()})} distinct source URLs")
     if state.get('scenario') is not None:
@@ -606,8 +639,11 @@ def build_graph(provider: AnalysisProvider | None = None, *, on_progress: Callab
     def validate_citations(state: State) -> dict[str, Any]:
         progress('validating')
         try:
-            return dict(_validate_citations(state), validation_error='')
+            result = _validate_citations(state)
+            record_validation(state['attempts'], 'passed')
+            return dict(result, validation_error='')
         except LiveAgentError as exc:
+            record_validation(state['attempts'], 'rejected', exc.reason)
             return {'validation_error': str(exc), 'repair_hint': exc.repair_hint, 'result': None}
 
     def validation_route(state: State):
