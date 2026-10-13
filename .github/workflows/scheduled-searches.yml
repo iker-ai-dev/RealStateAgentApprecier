@@ -2,6 +2,7 @@ name: Background lead searches
 
 on:
   schedule:
+    # All 6h UTC slots; the durable due-time filter also supports 12h and 24h agents.
     - cron: '17 */6 * * *'
   workflow_dispatch:
 

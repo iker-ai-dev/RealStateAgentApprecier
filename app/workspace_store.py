@@ -207,11 +207,13 @@ class _StoreInterface:
         owner = _identifier(owner, "Owner")
         self._write("lead", owner, _leads(leads))
 
-    def create_job(self, owner: str, query: str) -> dict:
+    def create_job(self, owner: str, query: str, *, agent_id: str | None = None) -> dict:
         owner = _identifier(owner, "Owner")
         stamp = _now()
         job = {"id": uuid4().hex, "status": "queued",
                "query": _text(query, "Query", 16_384), "created_at": stamp, "updated_at": stamp}
+        if agent_id is not None:
+            job["agent_id"] = _identifier(agent_id, "Agent ID")
         self._write("job", owner, [(job["id"], _encode(job))])
         return job
 
@@ -451,6 +453,16 @@ class WorkspaceStore(_StoreInterface):
         if len(rows) > MAX_READ_RECORDS:
             raise ValueError("Workspace read exceeds the record limit.")
         return [_job(row[0], row[1]) if kind == "job" else _decode(row[0]) for row in rows]
+
+    def list_jobs(self, owner: str) -> list[dict]:
+        """Latest durable completed/partial runs, including those without reports."""
+        with closing(self._connect()) as connection:
+            rows = connection.execute(
+                "SELECT payload, updated_at FROM jobs WHERE owner=? "
+                "AND json_extract(payload, '$.status') IN ('completed', 'partial') "
+                "ORDER BY json_extract(payload, '$.created_at') DESC, id DESC LIMIT ?",
+                (_identifier(owner, "Owner"), MAX_READ_RECORDS)).fetchall()
+        return [_job(row[0], row[1]) for row in rows]
 
     def due_agents(self, now: str, limit: int = 20) -> list[dict]:
         with closing(self._connect()) as connection:
@@ -806,6 +818,17 @@ class SnowflakeWorkspaceStore(_StoreInterface):
                 statement_params={"STATEMENT_TIMEOUT_IN_SECONDS": "30"}, log_on_exception=False,
             )
         return [{"owner": row[0], "job": _job(row[1], row[2])} for row in rows]
+
+    def list_jobs(self, owner: str) -> list[dict]:
+        """Same bounded, newest-first artifact history as the SQLite adapter."""
+        with self._session() as session:
+            rows = session.sql(
+                "SELECT payload, updated_at FROM RETAILSCOPE_WORKSPACE_RECORDS "
+                "WHERE record_type=? AND owner=? AND payload:status::STRING IN (?, ?) "
+                "ORDER BY payload:created_at::STRING DESC, id DESC LIMIT ?",
+                params=["job", _identifier(owner, "Owner"), "completed", "partial", MAX_READ_RECORDS],
+            ).collect(statement_params={"STATEMENT_TIMEOUT_IN_SECONDS": "30"}, log_on_exception=False)
+        return [_job(row[0], row[1]) for row in rows]
 
     def list_conversations(self, owner: str) -> list[dict]:
         """Latest 100 owned conversations, previewed by their first user message."""
