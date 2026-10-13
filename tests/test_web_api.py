@@ -69,6 +69,29 @@ class WorkspaceApiTests(unittest.TestCase):
         self.assertEqual(self.client.post("/api/chat", content="hello").status_code, 415)
         self.assertEqual(self.client.get("/api/status", headers={"Host": "attacker.example"}).status_code, 400)
 
+    def test_research_followup_uses_its_report_sources_not_older_workspace_leads(self):
+        self.client.get('/api/status')
+        owner = verify_browser_session(self.client.cookies.get('retailscope_session'), browser_signing_key())
+        stale = [dict(self.lead, id=f'old-{i}', title='Old unrelated source') for i in range(10)]
+        self.store.upsert_leads(owner, stale)
+        job = self.store.create_job(owner, 'Current retail search')
+        self.store.upsert_leads(owner, [self.lead])
+        self.store.update_job(owner, job['id'], 'completed', leads=[self.lead])
+        response = self.client.post('/api/chat', json={
+            'message': 'Which evidence should I verify?', 'conversation_id': job['id']})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.calls[-1][1], [self.lead])
+
+    def test_ad_hoc_chat_prefers_recent_sources(self):
+        self.client.get('/api/status')
+        owner = verify_browser_session(self.client.cookies.get('retailscope_session'), browser_signing_key())
+        self.store.upsert_leads(owner, [dict(self.lead, id=f'old-{i}') for i in range(10)])
+        self.store.upsert_leads(owner, [self.lead])
+        response = self.client.post('/api/chat', json={'message': 'Current evidence?'})
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(self.lead, self.calls[-1][1])
+        self.assertEqual(len(self.calls[-1][1]), 10)
+
     def test_no_sample_leads_on_new_workspace(self):
         response = self.client.get("/api/leads")
         self.assertEqual(response.json(), {"leads": []})

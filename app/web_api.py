@@ -301,6 +301,16 @@ def create_app(*, store=None, research_fn=None, analyze_fn=None):
             selected = [lead for lead in selected if lead["id"] == payload.lead_id]
             if not selected:
                 raise HTTPException(404, "Lead not found in this workspace.")
+        elif payload.conversation_id:
+            # Research reports use their job ID as the conversation ID. Keep
+            # follow-ups on that evidence instead of unrelated workspace history.
+            research_run = store.get_job(owner, payload.conversation_id)
+            if research_run and research_run.get('status') in ('completed', 'partial'):
+                selected = research_run.get('leads', [])
+            else:
+                selected = selected[-10:]
+        else:
+            selected = selected[-10:]
         gate.reserve(owner, request.client.host if request.client else "unknown", "chat")
         conversation_id = payload.conversation_id or secrets.token_hex(16)
         try:
