@@ -1,6 +1,24 @@
 import { z } from "zod";
 import { requestSignal } from "./requestSignal";
 
+export const factSchema = z.object({
+  value: z.number().finite().nullable(),
+  unit: z.string(),
+  quote: z.string().nullable(),
+  source_url: z.string().nullable(),
+  status: z.enum(["source_reported", "unknown"]),
+});
+export const factKeys = [
+  "asking_price",
+  "area_sqft",
+  "cap_rate",
+  "occupancy_pct",
+  "annual_noi",
+  "asking_rent_psf",
+  "population",
+  "median_household_income",
+] as const;
+
 export const leadSchema = z.object({
   id: z.string(),
   title: z.string(),
@@ -9,8 +27,35 @@ export const leadSchema = z.object({
   summary: z.string().nullish(),
   status: z.string().nullish(),
   retrieved_at: z.string().nullish(),
+  property_type: z.string().nullish(),
+  agent_id: z.string().nullish(),
+  job_id: z.string().nullish(),
+  read_at: z.string().nullish(),
+  facts: z.record(z.enum(factKeys), factSchema).nullish(),
 });
 export type Lead = z.infer<typeof leadSchema>;
+export const agentSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  city: z.string(),
+  min_price: z.number().finite(),
+  max_price: z.number().finite(),
+  strategy: z.string(),
+  enabled: z.boolean(),
+  cadence_hours: z.literal(6),
+  query: z.string(),
+  next_run_at: z.string().nullable(),
+  expires_at: z.string(),
+  last_run_at: z.string().nullable(),
+  last_status: z.string().nullable(),
+  last_job_id: z.string().nullable(),
+  last_error: z.string().nullable(),
+});
+export type Agent = z.infer<typeof agentSchema>;
+export type AgentInput = Pick<
+  Agent,
+  "name" | "city" | "min_price" | "max_price" | "strategy"
+>;
 export const statusSchema = z.object({
   providers: z.object({ snowflake: z.boolean(), nimble: z.boolean() }),
   model: z.string(),
@@ -137,6 +182,28 @@ async function request<S extends z.ZodTypeAny>(
 }
 
 export const api = {
+  agents: (signal?: AbortSignal) =>
+    request("/agents", z.object({ agents: z.array(agentSchema) }), signal),
+  createAgent: (body: AgentInput, signal?: AbortSignal) =>
+    request("/agents", agentSchema, signal, body),
+  updateAgent: (id: string, enabled: boolean, signal?: AbortSignal) =>
+    request(`/agents/${encodeURIComponent(id)}`, agentSchema, signal, {
+      enabled,
+    }),
+  runAgent: (id: string, signal?: AbortSignal) =>
+    request(
+      `/agents/${encodeURIComponent(id)}/run`,
+      z.object({ id: z.string(), status: z.string() }),
+      signal,
+      {},
+    ),
+  readLead: (id: string, signal?: AbortSignal) =>
+    request(
+      `/leads/${encodeURIComponent(id)}/read`,
+      z.object({ ok: z.literal(true) }),
+      signal,
+      {},
+    ),
   status: (signal?: AbortSignal) => request("/status", statusSchema, signal),
   leads: (signal?: AbortSignal) =>
     request("/leads", z.object({ leads: z.array(leadSchema) }), signal),
@@ -225,7 +292,12 @@ export async function pollResearch(
     const status = result.status.toLowerCase();
     if (
       [
-        "completed", "complete", "done", "succeeded", "success", "partial",
+        "completed",
+        "complete",
+        "done",
+        "succeeded",
+        "success",
+        "partial",
       ].includes(status)
     )
       return result;

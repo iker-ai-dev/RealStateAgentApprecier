@@ -5,7 +5,7 @@ from collections import defaultdict, deque
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import os
 from pathlib import Path
 import re
@@ -23,10 +23,12 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from app.data_access import get_snowflake_config
 from app.live_agent import LiveAgentError
+from app.search_agents import (SearchAgentRequest, AgentToggle, claim_agent, public_agent,
+                              scheduler_key, stamp, utc_now)
 from app.observability import capture_exception, init_sentry
 from app.underwriting import Scenario, calculate_scenario
 from app.workspace_tokens import (browser_signing_key, issue_browser_session,
-                                  issue_token, verify_browser_session, verify_token)
+                                  issue_token, verify_browser_session, verify_token, SESSION_LIFETIME)
 
 
 class ResearchRequest(BaseModel):
@@ -120,6 +122,7 @@ def create_app(*, store=None, research_fn=None, analyze_fn=None):
     executor = ThreadPoolExecutor(max_workers=3, thread_name_prefix="retailscope-research")
     gate = UsageGate(store.reserve_daily_usage)
     session_key = browser_signing_key()
+    agent_config_lock = threading.Lock()
 
     @asynccontextmanager
     async def lifespan(app):
@@ -163,6 +166,8 @@ def create_app(*, store=None, research_fn=None, analyze_fn=None):
         fresh = not is_mcp and owner is None
         if not is_mcp:
             request.state.owner = secrets.token_hex(32) if fresh else owner
+            request.state.session_expires_at = (int(time.time()) + SESSION_LIFETIME if fresh else
+                int(request.cookies["retailscope_session"].split('.')[2]))
         response = await call_next(request)
         response.headers["Cache-Control"] = "no-store"
         response.headers["X-Content-Type-Options"] = "nosniff"
@@ -188,7 +193,19 @@ def create_app(*, store=None, research_fn=None, analyze_fn=None):
 
     @app.get("/api/leads")
     def leads(request: Request):
-        return {"leads": store.list_leads(request.state.owner)}
+        from app.lead_facts import enrich_leads
+        owner = request.state.owner
+        receipts = {row["id"]: row["read_at"] for row in store.list_read_receipts(owner)}
+        return {"leads": [dict(lead, read_at=receipts.get(lead["id"]))
+                          for lead in enrich_leads(store.list_leads(owner))]}
+
+    @app.post("/api/leads/{lead_id}/read")
+    def read_lead(lead_id: str, request: Request):
+        owner = request.state.owner
+        if not any(lead["id"] == lead_id for lead in store.list_leads(owner)):
+            raise HTTPException(404, "Lead not found.")
+        store.mark_lead_read(owner, lead_id)
+        return {"ok": True}
 
     @app.post("/api/mcp-token")
     def mcp_token(request: Request):
@@ -201,11 +218,13 @@ def create_app(*, store=None, research_fn=None, analyze_fn=None):
     def scenario(payload: Scenario):
         return calculate_scenario(payload)
 
-    def run_research(owner, job_id, query):
+    def run_research(owner, job_id, query, agent_id=None):
         deadline = time.monotonic() + 300
         try:
             store.update_job(owner, job_id, "running", expected_status="queued")
             found = research_fn(query)
+            if agent_id:
+                found = [dict(lead, agent_id=agent_id, job_id=job_id) for lead in found]
             if time.monotonic() >= deadline:
                 raise TimeoutError("Research exceeded its execution deadline.")
             if found:
@@ -263,8 +282,125 @@ def create_app(*, store=None, research_fn=None, analyze_fn=None):
             gate.release(owner, "research")
             raise
 
+    @app.get("/api/agents")
+    def list_agents(request: Request):
+        owner = request.state.owner
+        agents = store.list_agents(owner)
+        now = stamp(utc_now())
+        for agent in agents:
+            if agent.get("expires_at", "") <= now and agent["enabled"]:
+                store.patch_agent(owner, agent["id"], {"enabled": False})
+                agent["enabled"] = False
+            if (agent.get("last_status") == "running" and agent.get("lease_until")
+                    and agent["lease_until"] <= now):
+                changes = {"last_status": "failed", "lease_until": None,
+                           "last_error": "Run was interrupted. The next scheduled search will still run."}
+                if store.patch_agent(owner, agent["id"], changes, {"run_id": agent["run_id"],
+                                      "last_status": "running", "lease_until": agent["lease_until"]}):
+                    agent.update(changes)
+        return {"agents": [public_agent(agent) for agent in agents]}
+
+    @app.post("/api/agents", status_code=201)
+    def create_agent(payload: SearchAgentRequest, request: Request):
+        owner = request.state.owner
+        with agent_config_lock:
+            if sum(agent.get("expires_at", "") > stamp(utc_now()) for agent in store.list_agents(owner)) >= 5:
+                raise HTTPException(409, "This workspace supports up to five background agents.")
+            agent = payload.as_agent()
+            expires_at = request.state.session_expires_at
+            if expires_at <= time.time():
+                raise HTTPException(401, "Workspace session expired. Reload before creating an agent.")
+            agent["expires_at"] = stamp(datetime.fromtimestamp(expires_at, timezone.utc))
+            if not store.enroll_agent(owner, agent):
+                raise HTTPException(409, "Background agent enrollment is full. Please try again later.")
+        return public_agent(agent)
+
+    @app.post("/api/agents/{agent_id}")
+    def toggle_agent(agent_id: str, payload: AgentToggle, request: Request):
+        owner = request.state.owner
+        agent = store.get_agent(owner, agent_id)
+        if agent is None:
+            raise HTTPException(404, "Background agent not found.")
+        if payload.enabled and agent.get("expires_at", "") <= stamp(utc_now()):
+            raise HTTPException(409, "This agent has expired. Create a new background search.")
+        if not store.patch_agent(owner, agent_id, {"enabled": payload.enabled}):
+            raise HTTPException(404, "Background agent not found.")
+        return public_agent(store.get_agent(owner, agent_id))
+
+    def finish_agent(owner, agent_id, run_id, job_id):
+        job = store.get_job(owner, job_id)
+        changes = {"lease_until": None, "last_status": job["status"],
+                   "last_error": job.get("error"), "last_job_id": job_id}
+        store.patch_agent(owner, agent_id, changes, {"run_id": run_id})
+
+    def execute_agent(owner, agent, run_id, job):
+        try:
+            run_research(owner, job["id"], agent["query"], agent["id"])
+        finally:
+            finish_agent(owner, agent["id"], run_id, job["id"])
+
+    def prepare_agent(owner, agent, ip, scheduled=False):
+        if needs_nimble_key and not os.getenv("NIMBLE_API_KEY", "").strip():
+            raise HTTPException(503, "Live discovery is unavailable: Nimble access is not configured.")
+        run_id = claim_agent(store, owner, agent, scheduled=scheduled)
+        if run_id is None:
+            raise HTTPException(409, "This agent is already running or no longer due.")
+        reserved = False
+        try:
+            gate.reserve(owner, ip, "research")
+            reserved = True
+            job = store.create_job(owner, agent["query"])
+            store.patch_agent(owner, agent["id"], {"last_job_id": job["id"]}, {"run_id": run_id})
+            return run_id, job
+        except Exception:
+            if reserved:
+                gate.release(owner, "research")
+            store.patch_agent(owner, agent["id"], {"lease_until": None, "last_status": "failed",
+                              "next_run_at": agent["next_run_at"],
+                              "admission_after": stamp(utc_now() + timedelta(seconds=30)),
+                              "last_error": "Run could not start. Check the research allowance or provider access."},
+                              {"run_id": run_id})
+            raise
+
+    @app.post("/api/agents/{agent_id}/run", status_code=202)
+    def run_agent(agent_id: str, request: Request):
+        owner = request.state.owner
+        agent = store.get_agent(owner, agent_id)
+        if agent is None:
+            raise HTTPException(404, "Background agent not found.")
+        run_id, job = prepare_agent(owner, agent, request.client.host if request.client else "unknown")
+        try:
+            executor.submit(execute_agent, owner, agent, run_id, job)
+        except Exception:
+            gate.release(owner, "research")
+            store.update_job(owner, job["id"], "failed", error="Run interrupted; please retry.")
+            finish_agent(owner, agent["id"], run_id, job["id"])
+            raise
+        return job
+
+    @app.post("/internal/schedules/tick")
+    def scheduled_tick(request: Request):
+        # No browser cookies or owner input: only the bounded internal dispatcher
+        # can enumerate due subscriptions across workspaces.
+        key = scheduler_key(session_key)
+        provided = request.headers.get("authorization", "")
+        if len(key) < 32 or not secrets.compare_digest(provided, "Bearer " + key):
+            raise HTTPException(401, "Scheduler authorization required.")
+        due = store.due_agents(stamp(utc_now()), limit=1)
+        if not due:
+            return {"ran": False}
+        owner, agent = due[0]["owner"], due[0]["agent"]
+        try:
+            run_id, job = prepare_agent(owner, agent, "scheduler", scheduled=True)
+        except HTTPException as exc:
+            return {"ran": False, "deferred": True, "status_code": exc.status_code}
+        execute_agent(owner, agent, run_id, job)
+        result = store.get_job(owner, job["id"])
+        return {"ran": True, "status": result["status"]}
+
     @app.get("/api/research/{job_id}")
     def research_status(job_id: str, request: Request):
+        from app.lead_facts import enrich_leads
         if not re.fullmatch(r"[a-f0-9]{32}", job_id):
             raise HTTPException(404, "Research run not found.")
         job = store.get_job(request.state.owner, job_id)
@@ -278,7 +414,7 @@ def create_app(*, store=None, research_fn=None, analyze_fn=None):
                                  error="Research was interrupted or exceeded its deadline. Submit a new run to retry.",
                                  expected_status=job["status"])
                 job = store.get_job(request.state.owner, job_id)
-        return job
+        return {**job, "leads": enrich_leads(job.get("leads", []))}
 
     @app.get("/api/conversations")
     def conversations(request: Request):

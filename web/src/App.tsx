@@ -36,6 +36,9 @@ import {
 import { Markdown } from "./Markdown";
 import { Mcp } from "./McpConnections";
 import { ScenarioForm } from "./ScenarioForm";
+import { SearchBuilder, defaultCriteria, searchPrompt } from "./SearchBuilder";
+import { LeadDetails } from "./LeadDetails";
+import { AgentsWorkspace } from "./AgentsWorkspace";
 
 type Message = {
   id: string;
@@ -93,12 +96,9 @@ function Notice({
   );
 }
 
-function retrievedAt(value: string): string {
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
-}
-
 export default function App() {
+  const [section, setSection] = useState<"chat" | "agents">("chat");
+  const [criteria, setCriteria] = useState(defaultCriteria);
   const [path, setPath] = useState(window.location.pathname);
   const [providers, setProviders] = useState<ProviderStatus>();
   const [statusError, setStatusError] = useState("");
@@ -110,12 +110,12 @@ export default function App() {
   const [leadsVersion, setLeadsVersion] = useState(0);
   const [selectedId, setSelectedId] = useState<string>();
   const [filter, setFilter] = useState("");
-  const [query, setQuery] = useState("");
+  const [query, setQuery] = useState(searchPrompt(defaultCriteria));
   const [researchStatus, setResearchStatus] = useState("");
   const [researchBusy, setResearchBusy] = useState(false);
   const [researchError, setResearchError] = useState("");
   const [researchFinished, setResearchFinished] = useState(false);
-  const [view, setView] = useState<View>("leads");
+  const [view, setView] = useState<View>("chat");
   const [draft, setDraft] = useState("");
   const [conversations, setConversations] = useState<
     Record<string, Conversation>
@@ -159,6 +159,7 @@ export default function App() {
       setRestoreId(
         new URLSearchParams(window.location.search).get("conversation"),
       );
+      setThreadVersion((value) => value + 1);
     };
     window.addEventListener("popstate", pop);
     return () => {
@@ -229,11 +230,15 @@ export default function App() {
     return () => controller.abort();
   }, [historyVersion, bootstrapReady]);
   useEffect(() => {
-    if (!restoreId || !bootstrapReady) return;
+    if (!restoreId || !bootstrapReady) {
+      setThreadLoading(false);
+      return;
+    }
     const controller = new AbortController();
     setThreadLoading(true);
     setHistoryError("");
     setSelectedId(undefined);
+    setSection("chat");
     setView("chat");
     updateConversation("__general__", () => ({ messages: [] }));
     api
@@ -289,9 +294,24 @@ export default function App() {
     }));
   }
 
-  async function research(event: FormEvent) {
-    event.preventDefault();
-    if (!bootstrapReady || !query.trim() || researchController.current) return;
+  async function research(event: FormEvent | null, existingId?: string) {
+    event?.preventDefault();
+    if (existingId) {
+      researchController.current?.abort();
+      researchController.current = null;
+      chatController.current?.abort();
+      setSection("chat");
+      setView("chat");
+      setSelectedId(undefined);
+      setRestoreId(null);
+      updateConversation("__general__", () => ({ messages: [] }));
+    }
+    if (
+      !bootstrapReady ||
+      (!existingId && !query.trim()) ||
+      researchController.current
+    )
+      return;
     leadsController.current?.abort();
     setLeadsLoading(false);
     const controller = new AbortController();
@@ -303,7 +323,9 @@ export default function App() {
     setResearchError("");
     setResearchStatus("Submitting");
     try {
-      const job = await api.research(query.trim(), signal);
+      const job = existingId
+        ? { id: existingId, status: "Loading report" }
+        : await api.research(query.trim(), signal);
       setResearchStatus(job.status);
       const result = await pollResearch(job.id, signal, setResearchStatus);
       if (!controller.signal.aborted) {
@@ -321,12 +343,18 @@ export default function App() {
         }
         setFilter("");
         if (!partial && result.analysis) {
-          updateConversation("__general__", (current) => ({
-            ...current,
-            id: current.id ?? job.id,
+          updateConversation("__general__", () => ({
+            id: job.id,
             messages: [
-              ...current.messages,
-              { id: `${job.id}-brief`, role: "user", text: query.trim() },
+              ...(!existingId
+                ? [
+                    {
+                      id: `${job.id}-brief`,
+                      role: "user" as const,
+                      text: query.trim(),
+                    },
+                  ]
+                : []),
               {
                 id: `${job.id}-report`,
                 role: "assistant",
@@ -336,6 +364,7 @@ export default function App() {
               },
             ],
           }));
+          threadUrl(job.id);
           setHistoryVersion((version) => version + 1);
           setView("chat");
         }
@@ -354,6 +383,18 @@ export default function App() {
         setResearchBusy(false);
       }
     }
+  }
+
+  function openReport(id: string) {
+    researchController.current?.abort();
+    chatController.current?.abort();
+    setDraft("");
+    setSelectedId(undefined);
+    setSection("chat");
+    setView("chat");
+    threadUrl(id);
+    setRestoreId(id);
+    setThreadVersion((value) => value + 1);
   }
 
   async function send(event: FormEvent) {
@@ -510,653 +551,682 @@ export default function App() {
               </button>
             </div>
           )}
-          <nav className="mobile-nav" aria-label="Workspace view">
-            {(
-              [
-                ["leads", Search, "Leads"],
-                ["chat", MessageSquare, "Chat"],
-                ["details", Building2, "Property"],
-              ] as const
-            ).map(([id, Icon, label]) => (
-              <button
-                key={id}
-                aria-current={view === id ? "page" : undefined}
-                onClick={() => setView(id)}
-              >
-                <Icon size={16} />
-                {label}
-              </button>
-            ))}
+          <nav className="workspace-nav" aria-label="Main workspace">
+            <button
+              aria-current={section === "chat" ? "page" : undefined}
+              onClick={() => setSection("chat")}
+            >
+              <MessageSquare size={16} />
+              Chat
+            </button>
+            <button
+              aria-current={section === "agents" ? "page" : undefined}
+              onClick={() => setSection("agents")}
+            >
+              <History size={16} />
+              Background agents / Inbox
+            </button>
           </nav>
-          <main className="workspace">
-            <section
-              className={`leads-pane pane ${view === "leads" ? "mobile-active" : ""}`}
-              aria-label="Lead discovery"
-            >
-              <div className="pane-heading">
-                <div>
-                  <span className="eyebrow">DISCOVERY</span>
-                  <h1>
-                    Property leads <span className="count">{leads.length}</span>
-                  </h1>
-                </div>
+          <div hidden={section !== "agents"}>
+            <AgentsWorkspace
+              ready={bootstrapReady}
+              active={section === "agents"}
+              onOpenReport={(id) => {
+                void research(null, id);
+              }}
+              onResearchLead={(lead) => {
+                setLeads((current) => [
+                  lead,
+                  ...current.filter((item) => item.id !== lead.id),
+                ]);
+                setSelectedId(lead.id);
+                setSection("chat");
+                setView("chat");
+                setDraft("");
+              }}
+            />
+          </div>
+          <div hidden={section !== "chat"}>
+            <nav className="mobile-nav" aria-label="Workspace view">
+              {(
+                [
+                  ["leads", Search, "Build search"],
+                  ["chat", MessageSquare, "Chat"],
+                  ["details", Building2, "Property"],
+                ] as const
+              ).map(([id, Icon, label]) => (
                 <button
-                  className="icon-button"
-                  title="Refresh leads"
-                  aria-label="Refresh leads"
-                  disabled={leadsLoading || researchBusy}
-                  onClick={() => {
-                    setResearchFinished(false);
-                    setLeadsVersion((value) => value + 1);
-                  }}
+                  key={id}
+                  aria-current={view === id ? "page" : undefined}
+                  onClick={() => setView(id)}
                 >
-                  <RefreshCw size={16} className={leadsLoading ? "spin" : ""} />
+                  <Icon size={16} />
+                  {label}
                 </button>
-              </div>
-              <form className="research-form" onSubmit={research}>
-                <label htmlFor="research-query">Research brief</label>
-                <textarea
-                  id="research-query"
-                  value={query}
-                  onChange={(event) => setQuery(event.target.value)}
-                  placeholder="Retail centers in Phoenix with redevelopment potential..."
-                  rows={3}
-                  disabled={researchBusy}
-                  minLength={3}
-                  maxLength={2000}
-                />
-                <div className="research-actions">
-                  <span>
-                    <Globe2 size={13} />
-                    Public-source research
-                  </span>
-                  {researchBusy ? (
-                    <button
-                      type="button"
-                      className="text-button"
-                      onClick={() => {
-                        researchController.current?.abort();
-                        setResearchStatus("Cancelled");
-                        setResearchError(
-                          "Research cancelled. No new results were loaded.",
-                        );
-                      }}
-                    >
-                      <Square size={13} />
-                      Cancel
-                    </button>
-                  ) : (
-                    <button
-                      className="primary-button"
-                      type="submit"
-                      disabled={!bootstrapReady || query.trim().length < 3}
-                    >
-                      <Search size={15} />
-                      Find leads
-                    </button>
-                  )}
+              ))}
+            </nav>
+            <main className="workspace">
+              <section
+                className={`leads-pane pane ${view === "leads" ? "mobile-active" : ""}`}
+                aria-label="Lead discovery"
+              >
+                <div className="pane-heading">
+                  <div>
+                    <span className="eyebrow">RESEARCH</span>
+                    <h1>
+                      Build search <span className="count">{leads.length}</span>
+                    </h1>
+                  </div>
+                  <button
+                    className="icon-button"
+                    title="Refresh leads"
+                    aria-label="Refresh leads"
+                    disabled={leadsLoading || researchBusy}
+                    onClick={() => {
+                      setResearchFinished(false);
+                      setLeadsVersion((value) => value + 1);
+                    }}
+                  >
+                    <RefreshCw
+                      size={16}
+                      className={leadsLoading ? "spin" : ""}
+                    />
+                  </button>
                 </div>
-              </form>
-              {researchBusy && (
-                <div className="progress" role="status">
-                  <LoaderCircle size={16} className="spin" />
-                  <span>
-                    Researching <b>{researchStatus.replaceAll("_", " ")}</b>
-                  </span>
-                </div>
-              )}
-              {!researchBusy && researchFinished &&
-                researchStatus === "Sources saved; analysis unavailable" && (
+                <form className="research-form" onSubmit={research}>
+                  <SearchBuilder
+                    value={criteria}
+                    disabled={researchBusy}
+                    onChange={(next) => {
+                      setCriteria(next);
+                      setQuery(searchPrompt(next));
+                    }}
+                  />
+                  <details className="edit-prompt">
+                    <summary>Edit prompt</summary>
+                    <label className="sr-only" htmlFor="research-query">
+                      Research brief
+                    </label>
+                    <textarea
+                      id="research-query"
+                      value={query}
+                      onChange={(event) => setQuery(event.target.value)}
+                      placeholder="Retail centers in Phoenix with redevelopment potential..."
+                      rows={3}
+                      disabled={researchBusy}
+                      minLength={3}
+                      maxLength={2000}
+                    />
+                  </details>
+                  <div className="research-actions">
+                    <span>
+                      <Globe2 size={13} />
+                      Public-source research
+                    </span>
+                    {researchBusy ? (
+                      <button
+                        type="button"
+                        className="text-button"
+                        onClick={() => {
+                          researchController.current?.abort();
+                          setResearchStatus("Cancelled");
+                          setResearchError(
+                            "Research cancelled. No new results were loaded.",
+                          );
+                        }}
+                      >
+                        <Square size={13} />
+                        Cancel
+                      </button>
+                    ) : (
+                      <button
+                        className="primary-button"
+                        type="submit"
+                        disabled={!bootstrapReady || query.trim().length < 3}
+                      >
+                        <Search size={15} />
+                        Send prompt
+                      </button>
+                    )}
+                  </div>
+                </form>
+                {researchBusy && (
                   <div className="progress" role="status">
-                    <span>{researchStatus}</span>
+                    <LoaderCircle size={16} className="spin" />
+                    <span>
+                      Researching <b>{researchStatus.replaceAll("_", " ")}</b>
+                    </span>
                   </div>
                 )}
-              {researchError && (
-                <Notice onRetry={() => setLeadsVersion((value) => value + 1)}>
-                  {researchError}
-                </Notice>
-              )}
-              {leadsError && (
-                <Notice onRetry={() => setLeadsVersion((value) => value + 1)}>
-                  {leadsError}
-                </Notice>
-              )}
-              <div className="lead-filter">
-                <Search size={15} />
-                <input
-                  aria-label="Filter leads"
-                  placeholder="Filter leads"
-                  value={filter}
-                  onChange={(event) => setFilter(event.target.value)}
-                />
-                {filter && (
-                  <button
-                    className="icon-button"
-                    title="Clear filter"
-                    aria-label="Clear filter"
-                    onClick={() => setFilter("")}
-                  >
-                    <X size={14} />
-                  </button>
-                )}
-              </div>
-              <div
-                className="lead-list"
-                aria-busy={leadsLoading || researchBusy}
-              >
-                {leadsLoading ? (
-                  <div className="loading-state" role="status">
-                    <LoaderCircle size={22} className="spin" />
-                    Loading leads
-                  </div>
-                ) : filtered.length ? (
-                  filtered.map((lead) => (
-                    <button
-                      className={`lead-row ${selected?.id === lead.id ? "selected" : ""}`}
-                      key={lead.id}
-                      aria-pressed={selected?.id === lead.id}
-                      onClick={() => {
-                        setSelectedId(lead.id);
-                        setView("details");
-                        setDraft("");
-                      }}
-                    >
-                      <div className="lead-row-top">
-                        <span className="lead-icon">
-                          <Building2 size={16} />
-                        </span>
-                        <span className="lead-status">
-                          {lead.status || "Source lead"}
-                        </span>
-                        <ChevronRight size={15} />
-                      </div>
-                      <h3>{lead.title}</h3>
-                      {lead.location && (
-                        <p className="lead-location">
-                          <MapPin size={12} />
-                          {lead.location}
-                        </p>
-                      )}
-                      {lead.summary && (
-                        <p className="lead-summary">{lead.summary}</p>
-                      )}
-                    </button>
-                  ))
-                ) : (
-                  <Empty
-                    icon={FileSearch}
-                    title={
-                      filter
-                        ? "No matching leads"
-                        : researchFinished
-                          ? "No leads returned"
-                          : "Your next opportunity starts here"
-                    }
-                  >
-                    {filter
-                      ? "Try another filter."
-                      : researchFinished
-                        ? "Refine your research brief and search again."
-                        : leadsError
-                          ? "Leads will appear when the API is available."
-                          : "No leads have been returned yet."}
-                  </Empty>
-                )}
-              </div>
-              <div className="pane-footer">
-                <ShieldCheck size={13} />
-                Source leads require verification
-              </div>
-            </section>
-            <section
-              className={`chat-pane pane ${view === "chat" ? "mobile-active" : ""}`}
-              aria-label="Research chat"
-            >
-              <div className="pane-heading">
-                <div>
-                  <span className="eyebrow cyan">RESEARCH</span>
-                  <h2>Ask RetailScope</h2>
-                </div>
-                <div className="chat-tools">
-                  <div className="history-picker">
-                    <History size={15} />
-                    <select
-                      aria-label="Chat history"
-                      value={conversation.id || ""}
-                      disabled={
-                        Boolean(chatBusyKey) || historyLoading || threadLoading
-                      }
-                      onChange={(event) => {
-                        setDraft("");
-                        const id = event.target.value;
-                        threadUrl(id || undefined);
-                        if (id) setRestoreId(id);
-                        else {
-                          setRestoreId(null);
-                          updateConversation(contextKey, () => ({
-                            messages: [],
-                          }));
-                        }
-                      }}
-                    >
-                      <option value="">
-                        {historyLoading ? "Loading history" : "Chat history"}
-                      </option>
-                      {conversation.id &&
-                        !history.some(
-                          (thread) => thread.id === conversation.id,
-                        ) && (
-                          <option value={conversation.id}>
-                            Current conversation
-                          </option>
-                        )}
-                      {history.map((thread) => (
-                        <option key={thread.id} value={thread.id}>
-                          {thread.preview.slice(0, 70) || "Saved conversation"}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                  <button
-                    className="icon-button"
-                    title="New conversation"
-                    aria-label="New conversation"
-                    disabled={
-                      Boolean(chatBusyKey) ||
-                      threadLoading ||
-                      (!conversation.messages.length && !restoreId)
-                    }
-                    onClick={() => {
-                      setRestoreId(null);
-                      threadUrl();
-                      updateConversation(contextKey, () => ({ messages: [] }));
-                      setDraft("");
-                    }}
-                  >
-                    <Plus size={18} />
-                  </button>
-                </div>
-              </div>
-              <div className="chat-context">
-                <span className="context-icon">
-                  <MessageSquare size={14} />
-                </span>
-                <span>{selected ? selected.title : "Ad hoc research"}</span>
-                {selected && (
-                  <button
-                    className="icon-button"
-                    title="Return to ad hoc chat"
-                    aria-label="Return to ad hoc chat"
-                    onClick={() => {
-                      setSelectedId(undefined);
-                      setDraft("");
-                    }}
-                  >
-                    <X size={14} />
-                  </button>
-                )}
-              </div>
-              <div
-                className="chat-history"
-                aria-label="Conversation"
-                aria-live="polite"
-              >
-                {historyError && (
-                  <Notice
-                    onRetry={() => {
-                      if (restoreId) setThreadVersion((value) => value + 1);
-                      else setHistoryVersion((value) => value + 1);
-                    }}
-                  >
-                    {historyError}
+                {!researchBusy &&
+                  researchFinished &&
+                  researchStatus === "Sources saved; analysis unavailable" && (
+                    <div className="progress" role="status">
+                      <span>{researchStatus}</span>
+                    </div>
+                  )}
+                {researchError && (
+                  <Notice onRetry={() => setLeadsVersion((value) => value + 1)}>
+                    {researchError}
                   </Notice>
                 )}
-                {threadLoading && (
-                  <div className="loading-state" role="status">
-                    <LoaderCircle size={20} className="spin" />
-                    Loading conversation
-                  </div>
+                {leadsError && (
+                  <Notice onRetry={() => setLeadsVersion((value) => value + 1)}>
+                    {leadsError}
+                  </Notice>
                 )}
-                {!conversation.messages.length && !threadLoading && (
-                  <div className="chat-welcome">
-                    <span className="chat-emblem">
-                      <Sparkles size={28} strokeWidth={1.5} />
-                    </span>
-                    <h2>What are you looking into?</h2>
-                    <p>
-                      {selected
-                        ? "Explore the selected property and its source evidence."
-                        : "Ask a property question or investigate a market."}
-                    </p>
-                    <div className="suggestions">
-                      {[
-                        "What evidence should I verify?",
-                        "Which risks need more research?",
-                      ].map((prompt) => (
-                        <button
-                          key={prompt}
-                          onClick={() => {
-                            setDraft(prompt);
-                            document.getElementById("chat-message")?.focus();
-                          }}
-                        >
-                          <span>{prompt}</span>
-                          <ArrowUp size={14} />
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                )}
-                {conversation.messages.map((message) => (
-                  <article
-                    className={`message ${message.role}`}
-                    key={message.id}
-                  >
-                    <div className="message-author">
-                      {message.role === "assistant" ? (
-                        <Sparkles size={14} />
-                      ) : (
-                        <MessageSquare size={14} />
-                      )}
-                      {message.role === "assistant" ? "RetailScope AI" : "You"}
-                      {message.model && (
-                        <span className="message-model">{message.model}</span>
-                      )}
-                      {message.scenarioAttached && (
-                        <span className="message-model">Scenario attached</span>
-                      )}
-                    </div>
-                    <div className="markdown">
-                      <Markdown>{message.text}</Markdown>
-                    </div>
-                    {message.sources && message.sources.length > 0 && (
-                      <div className="source-links">
-                        <span>Sources</span>
-                        {message.sources.map((source, index) =>
-                          safeUrl(source.url) ? (
-                            <a
-                              href={safeUrl(source.url)}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              key={`${source.url}-${index}`}
-                            >
-                              <Globe2 size={12} />
-                              {source.title}
-                              <ExternalLink size={11} />
-                            </a>
-                          ) : (
-                            <span key={index}>
-                              {source.title} (link unavailable)
-                            </span>
-                          ),
-                        )}
-                      </div>
-                    )}
-                  </article>
-                ))}
-                {chatBusyKey === contextKey && (
-                  <div className="chat-pending" role="status">
-                    <LoaderCircle size={16} className="spin" />
-                    Preparing an answer
-                  </div>
-                )}
-                {conversation.error && <Notice>{conversation.error}</Notice>}
-                <div ref={chatBottom} />
-              </div>
-              <form className="composer" onSubmit={send}>
-                <label className="sr-only" htmlFor="chat-message">
-                  Message RetailScope
-                </label>
-                <textarea
-                  id="chat-message"
-                  placeholder="Ask about a property, market or research question..."
-                  value={draft}
-                  onChange={(event) => setDraft(event.target.value)}
-                  maxLength={4000}
-                  rows={2}
-                  disabled={
-                    !bootstrapReady || Boolean(chatBusyKey) || threadLoading
-                  }
-                  onKeyDown={(event) => {
-                    if (
-                      event.key === "Enter" &&
-                      !event.shiftKey &&
-                      !event.nativeEvent.isComposing
-                    ) {
-                      event.preventDefault();
-                      event.currentTarget.form?.requestSubmit();
-                    }
-                  }}
-                />
-                {scenarios[contextKey] && (
-                  <label className="scenario-attachment">
-                    <input
-                      type="checkbox"
-                      checked={attached[contextKey] || false}
-                      disabled={Boolean(chatBusyKey)}
-                      onChange={(event) =>
-                        setAttached((current) => ({
-                          ...current,
-                          [contextKey]: event.target.checked,
-                        }))
-                      }
-                    />
-                    Attach calculated scenario
-                  </label>
-                )}
-                <div className="composer-bottom">
-                  <span className="model-label">
-                    <span className="status-dot" />
-                    {providers?.model || "Model unavailable"}
-                  </span>
-                  {chatBusyKey === contextKey ? (
+                <div className="lead-filter">
+                  <Search size={15} />
+                  <input
+                    aria-label="Filter leads"
+                    placeholder="Filter leads"
+                    value={filter}
+                    onChange={(event) => setFilter(event.target.value)}
+                  />
+                  {filter && (
                     <button
-                      type="button"
-                      className="send-button"
-                      title="Stop request"
-                      aria-label="Stop request"
-                      onClick={() => {
-                        chatController.current?.abort();
-                        updateConversation(contextKey, (current) => ({
-                          ...current,
-                          error: "Request cancelled. No answer was received.",
-                        }));
-                      }}
+                      className="icon-button"
+                      title="Clear filter"
+                      aria-label="Clear filter"
+                      onClick={() => setFilter("")}
                     >
-                      <Square size={15} />
-                    </button>
-                  ) : (
-                    <button
-                      className="send-button"
-                      type="submit"
-                      title="Send message"
-                      aria-label="Send message"
-                      disabled={
-                        !bootstrapReady ||
-                        !draft.trim() ||
-                        Boolean(chatBusyKey) ||
-                        threadLoading
-                      }
-                    >
-                      <ArrowUp size={18} />
+                      <X size={14} />
                     </button>
                   )}
                 </div>
-              </form>
-            </section>
-            <aside
-              className={`details-pane pane ${view === "details" ? "mobile-active" : ""}`}
-              aria-label="Selected property"
-            >
-              <div className="pane-heading">
-                <div>
-                  <span className="eyebrow">PROPERTY</span>
-                  <h2>Property details</h2>
-                </div>
-                {selected && (
-                  <button
-                    className="icon-button"
-                    title="Deselect property"
-                    aria-label="Deselect property"
-                    onClick={() => setSelectedId(undefined)}
-                  >
-                    <X size={16} />
-                  </button>
-                )}
-              </div>
-              {selected ? (
-                <div className="property-content">
-                  <div
-                    role="tablist"
-                    aria-label="Property detail view"
-                    className="property-tabs"
-                  >
-                    {(["overview", "scenario"] as const).map((tab) => (
+                <div
+                  className="lead-list"
+                  aria-busy={leadsLoading || researchBusy}
+                >
+                  {leadsLoading ? (
+                    <div className="loading-state" role="status">
+                      <LoaderCircle size={22} className="spin" />
+                      Loading leads
+                    </div>
+                  ) : filtered.length ? (
+                    filtered.map((lead) => (
                       <button
-                        key={tab}
-                        role="tab"
-                        id={`property-tab-${tab}`}
-                        aria-selected={propertyTab === tab}
-                        aria-controls={`property-${tab}`}
-                        tabIndex={propertyTab === tab ? 0 : -1}
-                        onClick={() => setPropertyTab(tab)}
-                        onKeyDown={(event) => {
-                          if (
-                            ["ArrowLeft", "ArrowRight", "Home", "End"].includes(
-                              event.key,
-                            )
-                          ) {
-                            event.preventDefault();
-                            const next =
-                              event.key === "Home"
-                                ? "overview"
-                                : event.key === "End"
-                                  ? "scenario"
-                                  : tab === "overview"
-                                    ? "scenario"
-                                    : "overview";
-                            setPropertyTab(next);
-                            document
-                              .getElementById(`property-tab-${next}`)
-                              ?.focus();
+                        className={`lead-row ${selected?.id === lead.id ? "selected" : ""}`}
+                        key={lead.id}
+                        aria-pressed={selected?.id === lead.id}
+                        onClick={() => {
+                          setSelectedId(lead.id);
+                          setView("details");
+                          setDraft("");
+                        }}
+                      >
+                        <div className="lead-row-top">
+                          <span className="lead-icon">
+                            <Building2 size={16} />
+                          </span>
+                          <span className="lead-status">
+                            {lead.status || "Source lead"}
+                          </span>
+                          <ChevronRight size={15} />
+                        </div>
+                        <h3>{lead.title}</h3>
+                        {lead.location && (
+                          <p className="lead-location">
+                            <MapPin size={12} />
+                            {lead.location}
+                          </p>
+                        )}
+                        {lead.summary && (
+                          <p className="lead-summary">{lead.summary}</p>
+                        )}
+                      </button>
+                    ))
+                  ) : (
+                    <Empty
+                      icon={FileSearch}
+                      title={
+                        filter
+                          ? "No matching leads"
+                          : researchFinished
+                            ? "No leads returned"
+                            : "Your next opportunity starts here"
+                      }
+                    >
+                      {filter
+                        ? "Try another filter."
+                        : researchFinished
+                          ? "Refine your research brief and search again."
+                          : leadsError
+                            ? "Leads will appear when the API is available."
+                            : "No leads have been returned yet."}
+                    </Empty>
+                  )}
+                </div>
+                <div className="pane-footer">
+                  <ShieldCheck size={13} />
+                  Source leads require verification
+                </div>
+              </section>
+              <section
+                className={`chat-pane pane ${view === "chat" ? "mobile-active" : ""}`}
+                aria-label="Research chat"
+              >
+                <div className="pane-heading">
+                  <div>
+                    <span className="eyebrow cyan">RESEARCH</span>
+                    <h2>Ask RetailScope</h2>
+                  </div>
+                  <div className="chat-tools">
+                    <div className="history-picker">
+                      <History size={15} />
+                      <select
+                        aria-label="Chat history"
+                        value={conversation.id || ""}
+                        disabled={
+                          Boolean(chatBusyKey) ||
+                          historyLoading ||
+                          threadLoading
+                        }
+                        onChange={(event) => {
+                          setDraft("");
+                          const id = event.target.value;
+                          threadUrl(id || undefined);
+                          if (id) openReport(id);
+                          else {
+                            setRestoreId(null);
+                            updateConversation(contextKey, () => ({
+                              messages: [],
+                            }));
                           }
                         }}
                       >
-                        {tab === "overview" ? "Overview" : "Underwriting"}
-                      </button>
-                    ))}
-                  </div>
-                  <div
-                    id="property-overview"
-                    role="tabpanel"
-                    aria-labelledby="property-tab-overview"
-                    hidden={propertyTab !== "overview"}
-                  >
-                    <span className="property-symbol">
-                      <Building2 size={28} strokeWidth={1.4} />
-                    </span>
-                    <span className="property-status">
-                      {selected.status || "Source lead"}
-                    </span>
-                    <h2>{selected.title}</h2>
-                    {selected.location && (
-                      <p className="property-location">
-                        <MapPin size={14} />
-                        {selected.location}
-                      </p>
-                    )}
-                    <h3>Source summary</h3>
-                    <p className="property-summary">
-                      {selected.summary || "No summary supplied by the source."}
-                    </p>
-                    <dl className="property-meta">
-                      <div>
-                        <dt>Lead ID</dt>
-                        <dd>{selected.id}</dd>
-                      </div>
-                      <div>
-                        <dt>Retrieved</dt>
-                        <dd>
-                          {selected.retrieved_at
-                            ? retrievedAt(selected.retrieved_at)
-                            : "Not supplied"}
-                        </dd>
-                      </div>
-                    </dl>
-                    {safeUrl(selected.url) ? (
-                      <a
-                        className="source-button"
-                        href={safeUrl(selected.url)}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                      >
-                        <Globe2 size={15} />
-                        Open original source
-                        <ExternalLink size={14} />
-                      </a>
-                    ) : (
-                      <p className="muted">Source link unavailable</p>
-                    )}
+                        <option value="">
+                          {historyLoading ? "Loading history" : "Chat history"}
+                        </option>
+                        {conversation.id &&
+                          !history.some(
+                            (thread) => thread.id === conversation.id,
+                          ) && (
+                            <option value={conversation.id}>
+                              Current conversation
+                            </option>
+                          )}
+                        {history.map((thread) => (
+                          <option key={thread.id} value={thread.id}>
+                            {thread.preview.slice(0, 70) ||
+                              "Saved conversation"}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
                     <button
-                      className="text-button property-chat"
+                      className="icon-button"
+                      title="New conversation"
+                      aria-label="New conversation"
+                      disabled={
+                        Boolean(chatBusyKey) ||
+                        threadLoading ||
+                        (!conversation.messages.length && !restoreId)
+                      }
                       onClick={() => {
-                        setView("chat");
-                        document.getElementById("chat-message")?.focus();
+                        setRestoreId(null);
+                        threadUrl();
+                        updateConversation(contextKey, () => ({
+                          messages: [],
+                        }));
+                        setDraft("");
                       }}
                     >
-                      <MessageSquare size={15} />
-                      Research this property
-                      <ArrowDown size={14} />
+                      <Plus size={18} />
                     </button>
                   </div>
-                  <div
-                    id="property-scenario"
-                    role="tabpanel"
-                    aria-labelledby="property-tab-scenario"
-                    hidden={propertyTab !== "scenario"}
-                  >
-                    <h2 className="scenario-property-title">
-                      {selected.title}
-                    </h2>
-                    <ScenarioForm
-                      key={selected.id}
-                      calculated={scenarios[selected.id]}
-                      onCalculated={(scenario) =>
-                        setScenarios((current) => ({
-                          ...current,
-                          [selected.id]: scenario,
-                        }))
-                      }
-                      onInvalidate={() => {
-                        setScenarios((current) => ({
-                          ...current,
-                          [selected.id]: undefined,
-                        }));
-                        setAttached((current) => ({
-                          ...current,
-                          [selected.id]: false,
-                        }));
-                      }}
-                      onAsk={() => {
-                        setAttached((current) => ({
-                          ...current,
-                          [selected.id]: true,
-                        }));
-                        setDraft(
-                          "Interpret this calculated scenario. Which assumptions and risks should I verify?",
-                        );
-                        setView("chat");
-                      }}
-                    />
-                  </div>
                 </div>
-              ) : (
-                <Empty icon={Building2} title="No property selected">
-                  Select a lead to review its details and original source.
-                </Empty>
-              )}
-            </aside>
-          </main>
+                <div className="chat-context">
+                  <span className="context-icon">
+                    <MessageSquare size={14} />
+                  </span>
+                  <span>{selected ? selected.title : "Ad hoc research"}</span>
+                  {selected && (
+                    <button
+                      className="icon-button"
+                      title="Return to ad hoc chat"
+                      aria-label="Return to ad hoc chat"
+                      onClick={() => {
+                        setSelectedId(undefined);
+                        setDraft("");
+                      }}
+                    >
+                      <X size={14} />
+                    </button>
+                  )}
+                </div>
+                <div
+                  className="chat-history"
+                  aria-label="Conversation"
+                  aria-live="polite"
+                >
+                  {researchBusy && (
+                    <div className="chat-pending" role="status">
+                      <LoaderCircle size={16} className="spin" />
+                      {researchStatus.replaceAll("_", " ")}
+                    </div>
+                  )}
+                  {historyError && (
+                    <Notice
+                      onRetry={() => {
+                        if (restoreId) setThreadVersion((value) => value + 1);
+                        else setHistoryVersion((value) => value + 1);
+                      }}
+                    >
+                      {historyError}
+                    </Notice>
+                  )}
+                  {threadLoading && (
+                    <div className="loading-state" role="status">
+                      <LoaderCircle size={20} className="spin" />
+                      Loading conversation
+                    </div>
+                  )}
+                  {!conversation.messages.length && !threadLoading && (
+                    <div className="chat-welcome">
+                      <span className="chat-emblem">
+                        <Sparkles size={28} strokeWidth={1.5} />
+                      </span>
+                      <h2>What are you looking into?</h2>
+                      <p>
+                        {selected
+                          ? "Explore the selected property and its source evidence."
+                          : "Ask a property question or investigate a market."}
+                      </p>
+                      <div className="suggestions">
+                        {[
+                          "What evidence should I verify?",
+                          "Which risks need more research?",
+                        ].map((prompt) => (
+                          <button
+                            key={prompt}
+                            onClick={() => {
+                              setDraft(prompt);
+                              document.getElementById("chat-message")?.focus();
+                            }}
+                          >
+                            <span>{prompt}</span>
+                            <ArrowUp size={14} />
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  {conversation.messages.map((message) => (
+                    <article
+                      className={`message ${message.role}`}
+                      key={message.id}
+                    >
+                      <div className="message-author">
+                        {message.role === "assistant" ? (
+                          <Sparkles size={14} />
+                        ) : (
+                          <MessageSquare size={14} />
+                        )}
+                        {message.role === "assistant"
+                          ? "RetailScope AI"
+                          : "You"}
+                        {message.model && (
+                          <span className="message-model">{message.model}</span>
+                        )}
+                        {message.scenarioAttached && (
+                          <span className="message-model">
+                            Scenario attached
+                          </span>
+                        )}
+                      </div>
+                      <div className="markdown">
+                        <Markdown>{message.text}</Markdown>
+                      </div>
+                      {message.sources && message.sources.length > 0 && (
+                        <div className="source-links">
+                          <span>Sources</span>
+                          {message.sources.map((source, index) =>
+                            safeUrl(source.url) ? (
+                              <a
+                                href={safeUrl(source.url)}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                key={`${source.url}-${index}`}
+                              >
+                                <Globe2 size={12} />
+                                {source.title}
+                                <ExternalLink size={11} />
+                              </a>
+                            ) : (
+                              <span key={index}>
+                                {source.title} (link unavailable)
+                              </span>
+                            ),
+                          )}
+                        </div>
+                      )}
+                    </article>
+                  ))}
+                  {chatBusyKey === contextKey && (
+                    <div className="chat-pending" role="status">
+                      <LoaderCircle size={16} className="spin" />
+                      Preparing an answer
+                    </div>
+                  )}
+                  {conversation.error && <Notice>{conversation.error}</Notice>}
+                  <div ref={chatBottom} />
+                </div>
+                <form className="composer" onSubmit={send}>
+                  <label className="sr-only" htmlFor="chat-message">
+                    Message RetailScope
+                  </label>
+                  <textarea
+                    id="chat-message"
+                    placeholder="Ask about a property, market or research question..."
+                    value={draft}
+                    onChange={(event) => setDraft(event.target.value)}
+                    maxLength={4000}
+                    rows={2}
+                    disabled={
+                      !bootstrapReady || Boolean(chatBusyKey) || threadLoading
+                    }
+                    onKeyDown={(event) => {
+                      if (
+                        event.key === "Enter" &&
+                        !event.shiftKey &&
+                        !event.nativeEvent.isComposing
+                      ) {
+                        event.preventDefault();
+                        event.currentTarget.form?.requestSubmit();
+                      }
+                    }}
+                  />
+                  {scenarios[contextKey] && (
+                    <label className="scenario-attachment">
+                      <input
+                        type="checkbox"
+                        checked={attached[contextKey] || false}
+                        disabled={Boolean(chatBusyKey)}
+                        onChange={(event) =>
+                          setAttached((current) => ({
+                            ...current,
+                            [contextKey]: event.target.checked,
+                          }))
+                        }
+                      />
+                      Attach calculated scenario
+                    </label>
+                  )}
+                  <div className="composer-bottom">
+                    <span className="model-label">
+                      <span className="status-dot" />
+                      {providers?.model || "Model unavailable"}
+                    </span>
+                    {chatBusyKey === contextKey ? (
+                      <button
+                        type="button"
+                        className="send-button"
+                        title="Stop request"
+                        aria-label="Stop request"
+                        onClick={() => {
+                          chatController.current?.abort();
+                          updateConversation(contextKey, (current) => ({
+                            ...current,
+                            error: "Request cancelled. No answer was received.",
+                          }));
+                        }}
+                      >
+                        <Square size={15} />
+                      </button>
+                    ) : (
+                      <button
+                        className="send-button"
+                        type="submit"
+                        title="Send message"
+                        aria-label="Send message"
+                        disabled={
+                          !bootstrapReady ||
+                          !draft.trim() ||
+                          Boolean(chatBusyKey) ||
+                          threadLoading
+                        }
+                      >
+                        <ArrowUp size={18} />
+                      </button>
+                    )}
+                  </div>
+                </form>
+              </section>
+              <aside
+                hidden={!selected}
+                className={`details-pane pane ${view === "details" ? "mobile-active" : ""}`}
+                aria-label="Selected property"
+              >
+                <div className="pane-heading">
+                  <div>
+                    <span className="eyebrow">PROPERTY</span>
+                    <h2>Property details</h2>
+                  </div>
+                  {selected && (
+                    <button
+                      className="icon-button"
+                      title="Deselect property"
+                      aria-label="Deselect property"
+                      onClick={() => setSelectedId(undefined)}
+                    >
+                      <X size={16} />
+                    </button>
+                  )}
+                </div>
+                {selected ? (
+                  <div className="property-content">
+                    <div
+                      role="tablist"
+                      aria-label="Property detail view"
+                      className="property-tabs"
+                    >
+                      {(["overview", "scenario"] as const).map((tab) => (
+                        <button
+                          key={tab}
+                          role="tab"
+                          id={`property-tab-${tab}`}
+                          aria-selected={propertyTab === tab}
+                          aria-controls={`property-${tab}`}
+                          tabIndex={propertyTab === tab ? 0 : -1}
+                          onClick={() => setPropertyTab(tab)}
+                          onKeyDown={(event) => {
+                            if (
+                              [
+                                "ArrowLeft",
+                                "ArrowRight",
+                                "Home",
+                                "End",
+                              ].includes(event.key)
+                            ) {
+                              event.preventDefault();
+                              const next =
+                                event.key === "Home"
+                                  ? "overview"
+                                  : event.key === "End"
+                                    ? "scenario"
+                                    : tab === "overview"
+                                      ? "scenario"
+                                      : "overview";
+                              setPropertyTab(next);
+                              document
+                                .getElementById(`property-tab-${next}`)
+                                ?.focus();
+                            }
+                          }}
+                        >
+                          {tab === "overview" ? "Overview" : "Underwriting"}
+                        </button>
+                      ))}
+                    </div>
+                    <div
+                      id="property-overview"
+                      role="tabpanel"
+                      aria-labelledby="property-tab-overview"
+                      hidden={propertyTab !== "overview"}
+                    >
+                      <LeadDetails lead={selected} />
+                      <button
+                        className="text-button property-chat"
+                        onClick={() => {
+                          setView("chat");
+                          document.getElementById("chat-message")?.focus();
+                        }}
+                      >
+                        <MessageSquare size={15} />
+                        Research this property
+                        <ArrowDown size={14} />
+                      </button>
+                    </div>
+                    <div
+                      id="property-scenario"
+                      role="tabpanel"
+                      aria-labelledby="property-tab-scenario"
+                      hidden={propertyTab !== "scenario"}
+                    >
+                      <h2 className="scenario-property-title">
+                        {selected.title}
+                      </h2>
+                      <ScenarioForm
+                        key={selected.id}
+                        calculated={scenarios[selected.id]}
+                        onCalculated={(scenario) =>
+                          setScenarios((current) => ({
+                            ...current,
+                            [selected.id]: scenario,
+                          }))
+                        }
+                        onInvalidate={() => {
+                          setScenarios((current) => ({
+                            ...current,
+                            [selected.id]: undefined,
+                          }));
+                          setAttached((current) => ({
+                            ...current,
+                            [selected.id]: false,
+                          }));
+                        }}
+                        onAsk={() => {
+                          setAttached((current) => ({
+                            ...current,
+                            [selected.id]: true,
+                          }));
+                          setDraft(
+                            "Interpret this calculated scenario. Which assumptions and risks should I verify?",
+                          );
+                          setView("chat");
+                        }}
+                      />
+                    </div>
+                  </div>
+                ) : (
+                  <Empty icon={Building2} title="No property selected">
+                    Select a lead to review its details and original source.
+                  </Empty>
+                )}
+              </aside>
+            </main>
+          </div>
         </>
       )}
     </div>
