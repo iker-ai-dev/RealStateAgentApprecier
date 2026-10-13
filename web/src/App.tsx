@@ -745,7 +745,7 @@ export default function App() {
                 className="lead-list"
                 aria-busy={leadsLoading || researchBusy}
               >
-                {leadsLoading ? (
+                {leadsLoading && !leads.length ? (
                   <div className="loading-state" role="status">
                     <LoaderCircle size={22} className="spin" />
                     Loading leads

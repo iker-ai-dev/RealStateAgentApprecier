@@ -41,6 +41,21 @@ const savedAgent: Agent = {
 };
 
 describe("search and background workspace", () => {
+  it("keeps saved leads visible while refreshing the list", async () => {
+    vi.spyOn(api, "leads")
+      .mockResolvedValueOnce({
+        leads: [
+          { id: "lead", title: "Retained lead", url: "https://example.org" },
+        ],
+      })
+      .mockImplementationOnce(() => new Promise(() => {}));
+    render(<App />);
+    await screen.findByRole("button", { name: /Retained lead/ });
+    fireEvent.click(screen.getByRole("button", { name: "Refresh leads" }));
+    expect(
+      screen.getByRole("button", { name: /Retained lead/ }),
+    ).toBeInTheDocument();
+  });
   it("shows inbox leads without waiting for tasks and keeps the request alive across tabs", async () => {
     let finish!: (value: { agents: Agent[] }) => void;
     const tasks = vi.spyOn(api, "agents").mockImplementation(
@@ -127,14 +142,12 @@ describe("search and background workspace", () => {
     vi.spyOn(api, "agents").mockResolvedValue({
       agents: [{ ...savedAgent, last_job_id: "report" }],
     });
-    const result = vi
-      .spyOn(api, "researchResult")
-      .mockResolvedValue({
-        id: "report",
-        status: "completed",
-        leads: [],
-        analysis: { answer: "Saved report answer", sources: [] },
-      });
+    const result = vi.spyOn(api, "researchResult").mockResolvedValue({
+      id: "report",
+      status: "completed",
+      leads: [],
+      analysis: { answer: "Saved report answer", sources: [] },
+    });
     vi.spyOn(api, "chat").mockResolvedValue({
       conversation_id: "report",
       answer: "Follow-up answer",
