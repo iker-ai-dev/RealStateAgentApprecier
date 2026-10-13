@@ -41,6 +41,124 @@ const savedAgent: Agent = {
 };
 
 describe("search and background workspace", () => {
+  it("shows inbox leads without waiting for tasks and keeps the request alive across tabs", async () => {
+    let finish!: (value: { agents: Agent[] }) => void;
+    const tasks = vi.spyOn(api, "agents").mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    vi.spyOn(api, "leads").mockResolvedValue({
+      leads: [
+        {
+          id: "fast",
+          title: "Already retrieved",
+          url: "https://example.org",
+          read_at: "read",
+        },
+      ],
+    });
+    render(<App />);
+    fireEvent.click(
+      screen.getByRole("button", { name: "Background agents / Inbox" }),
+    );
+    const inbox = await screen.findByLabelText("Inbox results");
+    fireEvent.click(
+      await within(inbox).findByRole("button", { name: /Already retrieved/ }),
+    );
+    expect(
+      screen.getByRole("complementary", { name: "Inbox property" }),
+    ).toHaveTextContent("Already retrieved");
+    fireEvent.click(screen.getByRole("button", { name: "Chat" }));
+    expect(tasks.mock.calls[0][0]?.aborted).toBe(false);
+    fireEvent.click(
+      screen.getByRole("button", { name: "Background agents / Inbox" }),
+    );
+    expect(tasks).toHaveBeenCalledOnce();
+    expect(
+      screen.getByRole("complementary", { name: "Inbox property" }),
+    ).toHaveTextContent("Already retrieved");
+    finish({ agents: [savedAgent] });
+    await screen.findByRole("heading", { name: "Phoenix watch" });
+    fireEvent.click(screen.getByRole("link", { name: "MCP" }));
+    fireEvent.click(screen.getByRole("button", { name: "Workspace" }));
+    expect(
+      screen.getByRole("complementary", { name: "Inbox property" }),
+    ).toHaveTextContent("Already retrieved");
+    expect(tasks).toHaveBeenCalledOnce();
+  });
+
+  it("keeps the current chat visible while a different history entry loads or fails", async () => {
+    vi.spyOn(api, "conversations").mockResolvedValue({
+      conversations: [
+        { id: "one", preview: "First" },
+        { id: "two", preview: "Second" },
+      ],
+    });
+    let fail!: (reason: Error) => void;
+    vi.spyOn(api, "conversation")
+      .mockResolvedValueOnce({
+        id: "one",
+        messages: [{ role: "assistant", content: "Keep this answer" }],
+      })
+      .mockImplementationOnce(
+        () =>
+          new Promise((_resolve, reject) => {
+            fail = reject;
+          }),
+      );
+    render(<App />);
+    await screen.findByRole("option", { name: "First" });
+    fireEvent.change(screen.getByLabelText("Chat history"), {
+      target: { value: "one" },
+    });
+    await screen.findByText("Keep this answer");
+    fireEvent.change(screen.getByLabelText("Chat history"), {
+      target: { value: "two" },
+    });
+    expect(screen.getByText("Keep this answer")).toBeInTheDocument();
+    fail(new Error("Temporary network failure"));
+    await screen.findByText("Temporary network failure");
+    expect(screen.getByText("Keep this answer")).toBeInTheDocument();
+  });
+
+  it("reopens a completed agent report immediately without refetching or losing its follow-up", async () => {
+    vi.spyOn(api, "agents").mockResolvedValue({
+      agents: [{ ...savedAgent, last_job_id: "report" }],
+    });
+    const result = vi
+      .spyOn(api, "researchResult")
+      .mockResolvedValue({
+        id: "report",
+        status: "completed",
+        leads: [],
+        analysis: { answer: "Saved report answer", sources: [] },
+      });
+    vi.spyOn(api, "chat").mockResolvedValue({
+      conversation_id: "report",
+      answer: "Follow-up answer",
+      sources: [],
+    });
+    render(<App />);
+    fireEvent.click(
+      screen.getByRole("button", { name: "Background agents / Inbox" }),
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "Open report" }));
+    await screen.findByText("Saved report answer");
+    fireEvent.change(screen.getByLabelText("Message RetailScope"), {
+      target: { value: "Continue" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+    await screen.findByText("Follow-up answer");
+    fireEvent.click(
+      screen.getByRole("button", { name: "Background agents / Inbox" }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Open report" }));
+    expect(screen.getByText("Follow-up answer")).toBeInTheDocument();
+    expect(result).toHaveBeenCalledOnce();
+  });
+
   it("generates a search from presets, city, budgets and strategy", async () => {
     const research = vi
       .spyOn(api, "research")

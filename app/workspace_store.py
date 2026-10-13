@@ -17,8 +17,11 @@ import json
 import os
 from pathlib import Path
 import sqlite3
+from threading import BoundedSemaphore, Lock
+from time import monotonic
 from typing import Any, Callable
 from uuid import uuid4
+import weakref
 
 
 MAX_JSON_BYTES = 1_048_576
@@ -524,6 +527,79 @@ class WorkspaceStore(_StoreInterface):
             return False
 
 
+class _WorkspaceSessionPool:
+    """Exclusive, bounded leases of locally owned sessions; never retry SQL.
+
+    Age is checked on checkout/return (no background keepalive). Idle sessions
+    close on store collection/process exit; active leases close on return after
+    shutdown. The semaphore includes authentication and disposal, not just SQL.
+    """
+
+    def __init__(self, factory: Callable[[], Any], *, size: int = 4,
+                 max_age: float = 300, max_uses: int = 100, wait_timeout: float = 30):
+        self._factory = factory
+        self._slots = BoundedSemaphore(size)
+        self._lock = Lock()
+        self._idle: list[tuple[Any, float, int]] = []
+        self._closed = False
+        self._max_age = max_age
+        self._max_uses = max_uses
+        self._wait_timeout = wait_timeout
+
+    @staticmethod
+    def _dispose(session):
+        try:
+            session.close()
+        except Exception:
+            # A close failure must not hide the original error or make a committed
+            # write look retryable. The session is discarded regardless.
+            pass
+
+    @contextmanager
+    def lease(self):
+        if not self._slots.acquire(timeout=self._wait_timeout):
+            raise TimeoutError("Workspace session pool is busy; no operation was started.")
+        session = None
+        reusable = False
+        try:
+            with self._lock:
+                if self._closed:
+                    raise RuntimeError("Workspace session pool is closed.")
+                entry = self._idle.pop() if self._idle else None
+            if entry is not None:
+                session, created, uses = entry
+                if monotonic() - created >= self._max_age:
+                    self._dispose(session)
+                    session = None
+            if session is None:
+                session = self._factory()
+                created, uses = monotonic(), 0
+            yield session
+            uses += 1
+            reusable = uses < self._max_uses and monotonic() - created < self._max_age
+        finally:
+            if session is not None:
+                with self._lock:
+                    if reusable and not self._closed:
+                        self._idle.append((session, created, uses))
+                        session = None
+                if session is not None:
+                    self._dispose(session)
+            self._slots.release()
+
+    def close(self):
+        with self._lock:
+            self._closed = True
+            idle, self._idle = self._idle, []
+        for session, _, _ in idle:
+            self._dispose(session)
+
+
+# A hosted active session can be returned to multiple store instances. Serialize
+# workspace operations on it, but leave its lifetime to the Snowflake host.
+_managed_workspace_lock = Lock()
+
+
 class SnowflakeWorkspaceStore(_StoreInterface):
     """A preprovisioned Snowflake VARIANT table accessed through a session factory.
 
@@ -630,7 +706,10 @@ class SnowflakeWorkspaceStore(_StoreInterface):
                     [owner, agent["id"], _encode(agent)])
                 sql("COMMIT")
             except Exception:
-                sql("ROLLBACK")
+                try:
+                    sql("ROLLBACK")
+                except Exception:
+                    pass  # Preserve the original failure, including ambiguous COMMIT.
                 raise
         return True
 
@@ -788,16 +867,27 @@ def get_store() -> WorkspaceStore | SnowflakeWorkspaceStore:
     if provider == "sqlite":
         return WorkspaceStore()
     if provider == "snowflake":
+        def create_session():
+            from app.data_access import get_snowflake_config, get_snowpark_session
+
+            return get_snowpark_session(get_snowflake_config())
+
+        pool = _WorkspaceSessionPool(create_session)
+
         @contextmanager
         def session_factory():
-            from app.data_access import get_managed_snowpark_session, get_snowflake_config, get_snowpark_session
+            from app.data_access import get_managed_snowpark_session
 
             session = get_managed_snowpark_session()
             if session is None:
-                with closing(get_snowpark_session(get_snowflake_config())) as session:
+                with pool.lease() as session:
                     yield session
             else:
-                yield session
+                with _managed_workspace_lock:
+                    yield session
 
-        return SnowflakeWorkspaceStore(session_factory, contextmanaged_factory=True)
+        store = SnowflakeWorkspaceStore(session_factory, contextmanaged_factory=True)
+        # The callback retains the pool, not the store; it also runs at normal exit.
+        weakref.finalize(store, pool.close)
+        return store
     raise ValueError("RETAILSCOPE_STORAGE must be 'sqlite' or 'snowflake'.")
