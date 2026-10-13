@@ -13,6 +13,7 @@ import re
 from urllib.parse import urlsplit
 
 from app.listing_discovery import lead_kind, safe_public_url
+from app.structured_properties import is_json_evidence, rental_price_context, structured_properties
 
 
 MAX_TEXT = 8000
@@ -34,7 +35,7 @@ _VALUE = rf"(?P<number>{_NUMBER})(?:\s*(?P<scale>million|thousand|billion|[mkb])
 _MONEY = rf"(?:\$\s*{_VALUE}|USD\s+{_VALUE.replace('number', 'usd_number').replace('scale', 'usd_scale')})"
 _JOIN = r"\s*(?::|=|\bis\b|\bof\b)?\s*"
 _SF = r"(?:sq\.?\s*ft\.?|square\s+feet|sf)\b"
-_PRICE = r"(?:asking\s+price|sale\s+price|list(?:ing)?\s+price)"
+_PRICE = r"(?:asking\s+price|sale\s+price|list(?:ing)?\s+price|offered\s+at)"
 _CAP = r"cap(?:italization)?\s*(?:rate)?"
 _OCCUPANCY = r"(?:occupancy(?:\s+rate)?|occupied|leased)"
 _ANNUAL_NOI = r"annual\s*(?:NOI|net\s+operating\s+income)"
@@ -159,7 +160,7 @@ def _value(match):
     return int(value) if value == value.to_integral_value() else float(value)
 
 
-def _facts(lead):
+def _facts(lead, *, isolated=False):
     facts = {key: {"value": None, "unit": unit, "quote": None,
                    "source_url": None, "status": "unknown"} for key, unit in UNITS.items()}
     texts = _evidence(lead)
@@ -168,10 +169,10 @@ def _facts(lead):
         return facts
     title = lead.get("title") if isinstance(lead.get("title"), str) else ""
     combined = "\n".join(texts)
-    property_source = (lead.get("lead_kind", "property_discovery") == "property_discovery"
+    property_source = ((isolated or (lead.get("lead_kind", "property_discovery") == "property_discovery"
                        and lead_kind(url) == "property_discovery"
                        and str(lead.get("source_kind", "")).lower() not in _INDEX_KINDS
-                       and not _INDEX_PATH.search(urlsplit(url).path)
+                       and not _INDEX_PATH.search(urlsplit(url).path)))
                        and len(title) <= MAX_TEXT
                        and not _CATALOG.search(title)
                        and not any(_CATALOG.search(text) for text in texts)
@@ -194,6 +195,7 @@ def _facts(lead):
                     if (len(clause) > MAX_CLAUSE or _UNCERTAIN.search(clause) or _RANGE.search(clause)
                             or value is None or (key in {"cap_rate", "occupancy_pct"} and value > 100)
                             or re.match(r"\s*[:=]", tail) or _ALTERNATIVE.match(tail)
+                            or (key == "asking_price" and rental_price_context(clause, tail=tail))
                             or (key in {"asking_price", "annual_noi", "median_household_income"}
                                 and _PER_UNIT.match(tail))
                             or (UNITS[key].startswith("USD") and _FOREIGN_CURRENCY.search(clause))
@@ -230,6 +232,13 @@ def enrich_leads(leads: list[dict]) -> list[dict]:
     enriched = []
     for lead in leads:
         copied = deepcopy(lead)
-        copied["facts"] = _facts(lead)
+        copied.pop("properties", None)  # Never trust previously populated children.
+        texts = _evidence(lead)
+        structured = texts and any(is_json_evidence(text) for text in texts)
+        copied["facts"] = _facts({} if structured else lead)
+        if structured and _source_url(lead):
+            properties = structured_properties(lead, texts)
+            if properties:
+                copied["properties"] = properties
         enriched.append(copied)
     return enriched

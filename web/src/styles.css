@@ -1337,6 +1337,26 @@ svg {
   display: block;
   margin-bottom: 8px;
 }
+.source-properties {
+  margin-bottom: 24px;
+}
+.source-properties label {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+.source-properties select {
+  width: 100%;
+  min-width: 0;
+  text-overflow: ellipsis;
+}
+.source-property-count {
+  display: block;
+  margin-top: 6px;
+  color: var(--mint);
+}
 .property-content h2 {
   font-size: 20px;
   overflow-wrap: anywhere;

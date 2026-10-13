@@ -1,5 +1,6 @@
 import { ExternalLink, Globe2, MapPin } from "lucide-react";
-import { factKeys, safeUrl, type Lead } from "./api";
+import { useState } from "react";
+import { factKeys, preferredProperty, safeUrl, type Lead } from "./api";
 
 const labels: Record<(typeof factKeys)[number], string> = {
   asking_price: "Asking price",
@@ -11,7 +12,32 @@ const labels: Record<(typeof factKeys)[number], string> = {
   population: "Population",
   median_household_income: "Median household income",
 };
-export function LeadDetails({ lead }: { lead: Lead }) {
+export function LeadDetails({ lead, selectedPropertyId, onPropertySelect }: {
+  lead: Lead;
+  selectedPropertyId?: string;
+  onPropertySelect?: (id: string) => void;
+}) {
+  const [localPropertyId, setLocalPropertyId] = useState<string>();
+  const properties = lead.properties ?? [];
+  const property = properties.find((item) => item.id === (selectedPropertyId ?? localPropertyId)) ?? preferredProperty(lead);
+  return <>
+    {property && <div className="source-properties">
+      <p className="muted">{lead.title}</p>
+      <label>
+        Properties in this source ({properties.length})
+        <select aria-label="Property from source" value={property.id} onChange={(event) => {
+          setLocalPropertyId(event.target.value);
+          onPropertySelect?.(event.target.value);
+        }}>
+          {properties.map((item) => <option key={item.id} value={item.id}>{item.title}</option>)}
+        </select>
+      </label>
+    </div>}
+    <PropertyDetails lead={property ? { ...lead, ...property, properties: undefined } : lead} />
+  </>;
+}
+
+function PropertyDetails({ lead }: { lead: Lead }) {
   const provided = (value?: string | null) =>
     value && !["unknown", "n/a", "none"].includes(value.toLowerCase())
       ? value
@@ -38,11 +64,10 @@ export function LeadDetails({ lead }: { lead: Lead }) {
       <h3>Source-reported facts</h3>
       {!knownCount && (
         <p className="muted">
-          This source does not provide extractable property metrics. It may be
-          background research rather than a property listing.
+          No property-level figures could be extracted from the saved source.
         </p>
       )}
-      <dl className="fact-grid">
+      {knownCount > 0 && <dl className="fact-grid">
         {factKeys.map((key) => {
           const fact = lead.facts?.[key];
           const known =
@@ -90,8 +115,8 @@ export function LeadDetails({ lead }: { lead: Lead }) {
             </div>
           );
         })}
-      </dl>
-      <p className="muted">Source claims, not verified valuations.</p>
+      </dl>}
+      {knownCount > 0 && <p className="muted">Source claims, not verified valuations.</p>}
       <h3>Source summary</h3>
       <p className="property-summary">
         {lead.summary || "No summary supplied by the source."}
