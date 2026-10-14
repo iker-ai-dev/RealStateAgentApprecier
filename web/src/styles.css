@@ -687,6 +687,7 @@ svg {
   gap: 18px;
 }
 .provider-connections { position: relative; display: flex; align-items: center; gap: 8px; }
+.provider-connections .provider-pills { display: flex; }
 .provider small { display: block; font-size: 10px; color: var(--muted); line-height: 1.3; }
 .provider.configured .status-dot { background: #dfbf78; }
 .provider.error .status-dot, .provider.not_configured .status-dot { background: var(--coral); }
