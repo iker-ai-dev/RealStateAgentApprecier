@@ -31,7 +31,7 @@ MAX_READ_RECORDS = 1000
 MAX_TEXT_BYTES = 65_536
 MAX_CONVERSATIONS = 100
 MAX_CONVERSATION_PREVIEW = 100
-JOB_PATCH_FIELDS = ("status", "leads", "error", "analysis", "stage", "started_at")
+JOB_PATCH_FIELDS = ("status", "leads", "error", "analysis", "stage", "started_at", "activity")
 MESSAGE_METADATA_FIELDS = ("sources", "model", "usage")
 
 SNOWFLAKE_SCHEMA_SQL = """
@@ -207,20 +207,26 @@ class _StoreInterface:
         owner = _identifier(owner, "Owner")
         self._write("lead", owner, _leads(leads))
 
-    def create_job(self, owner: str, query: str, *, agent_id: str | None = None) -> dict:
+    def create_job(self, owner: str, query: str, *, agent_id: str | None = None,
+                   kind: str = "research", conversation_id: str | None = None) -> dict:
         owner = _identifier(owner, "Owner")
         stamp = _now()
         job = {"id": uuid4().hex, "status": "queued",
                "query": _text(query, "Query", 16_384), "created_at": stamp, "updated_at": stamp}
         if agent_id is not None:
             job["agent_id"] = _identifier(agent_id, "Agent ID")
+        if kind not in {"research", "chat"}:
+            raise ValueError("Invalid job kind.")
+        job["kind"] = kind
+        job["conversation_id"] = _identifier(conversation_id, "Conversation ID") if conversation_id else job["id"]
         self._write("job", owner, [(job["id"], _encode(job))])
         return job
 
     def update_job(self, owner: str, id: str, status: str,
                    leads: list[dict] | None = None, error: str | None = None,
                    analysis: dict | None = None, expected_status: str | None = None,
-                   *, stage: str | None = None, started_at: str | None = None) -> bool:
+                   *, stage: str | None = None, started_at: str | None = None,
+                   activity: list[dict] | None = None) -> bool:
         """Patch an existing owned job; unknown/foreign IDs are an inert no-op.
 
         Omitted leads/error/analysis preserve previous fields. Analysis reports
@@ -236,11 +242,18 @@ class _StoreInterface:
             expected_status = _identifier(expected_status, "Expected job status")
         changes = {"status": _identifier(status, "Job status")}
         if stage is not None:
-            if stage not in {"searching", "analyzing", "validating", "repairing", "completed", "partial", "failed"}:
+            if stage not in {"searching", "inspecting", "followup", "planning", "analyzing", "validating", "repairing", "completed", "partial", "failed"}:
                 raise ValueError("Invalid research stage.")
             changes["stage"] = stage
         if started_at is not None:
             changes["started_at"] = _timestamp(started_at)
+        if activity is not None:
+            if not isinstance(activity, list) or len(activity) > 40:
+                raise ValueError("Invalid job activity.")
+            changes["activity"] = [{"id": _identifier(item["id"], "Activity ID"),
+                                    "stage": _identifier(item["stage"], "Activity stage"),
+                                    "message": _text(item["message"], "Activity message", 3200),
+                                    "created_at": _timestamp(item["created_at"])} for item in activity]
         if leads is not None:
             changes["leads"] = [_decode(payload) for _, payload in _leads(leads)]
         if error is not None:
@@ -462,6 +475,14 @@ class WorkspaceStore(_StoreInterface):
                 "AND json_extract(payload, '$.status') IN ('completed', 'partial') "
                 "ORDER BY json_extract(payload, '$.created_at') DESC, id DESC LIMIT ?",
                 (_identifier(owner, "Owner"), MAX_READ_RECORDS)).fetchall()
+        return [_job(row[0], row[1]) for row in rows]
+
+    def active_jobs(self, owner: str) -> list[dict]:
+        with closing(self._connect()) as connection:
+            rows = connection.execute(
+                "SELECT payload, updated_at FROM jobs WHERE owner=? "
+                "AND json_extract(payload, '$.status') IN ('queued', 'running') "
+                "ORDER BY updated_at DESC LIMIT 10", (_identifier(owner, "Owner"),)).fetchall()
         return [_job(row[0], row[1]) for row in rows]
 
     def due_agents(self, now: str, limit: int = 20) -> list[dict]:
@@ -827,6 +848,15 @@ class SnowflakeWorkspaceStore(_StoreInterface):
                 "WHERE record_type=? AND owner=? AND payload:status::STRING IN (?, ?) "
                 "ORDER BY payload:created_at::STRING DESC, id DESC LIMIT ?",
                 params=["job", _identifier(owner, "Owner"), "completed", "partial", MAX_READ_RECORDS],
+            ).collect(statement_params={"STATEMENT_TIMEOUT_IN_SECONDS": "30"}, log_on_exception=False)
+        return [_job(row[0], row[1]) for row in rows]
+
+    def active_jobs(self, owner: str) -> list[dict]:
+        with self._session() as session:
+            rows = session.sql(
+                "SELECT payload, updated_at FROM RETAILSCOPE_WORKSPACE_RECORDS "
+                "WHERE record_type=? AND owner=? AND payload:status::STRING IN (?, ?) "
+                "ORDER BY updated_at DESC LIMIT 10", params=["job", _identifier(owner, "Owner"), "queued", "running"],
             ).collect(statement_params={"STATEMENT_TIMEOUT_IN_SECONDS": "30"}, log_on_exception=False)
         return [_job(row[0], row[1]) for row in rows]
 

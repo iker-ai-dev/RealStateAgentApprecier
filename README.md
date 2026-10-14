@@ -8,7 +8,9 @@ and durable Snowflake workspace records. It does not fall back to sample data.
 The older Streamlit application below remains a separate deployment/reference.
 
 - **Chat:** choose a US city, purchase budget, and investment strategy, then send
-  the generated research prompt. Ask follow-up questions about the same evidence.
+  the generated research prompt, or talk freely with filters off. Ask for more
+  sources to launch a follow-up investigation in the same chat. Chat history is
+  collapsed by default.
 - **Background agents:** save up to five searches per browser workspace. Pause,
   resume, or run a search immediately. Results arrive in a durable lead inbox.
 - **Lead details:** the same source-backed metric view is used in chat and the
@@ -16,6 +18,19 @@ The older Streamlit application below remains a separate deployment/reference.
   household income are shown only when explicitly extractable. Missing,
   ambiguous, or multi-property values stay unknown. These are source assertions,
   not verified appraisals or guaranteed budget matches.
+
+Research uses at most six Nimble searches and one Cortex planning call to choose
+targeted follow-ups from evidence gaps. Full page content is requested when the
+provider's advertised schema permits it; there is no arbitrary URL/PDF reader or
+access to private broker documents. Final analysis has at most one citation-repair
+call. Retrieval has a 240-second admission budget; an in-flight Cortex statement
+can take up to 90 seconds. These are ceilings, not promised completion times.
+
+Both chat and research stream durable activity snapshots and newly retrieved
+sources over server-sent events. The answer is displayed after validation; this is
+not raw model-token or private-reasoning streaming. Disconnects reconnect to the
+same run without repeating paid work. Submitted turns are saved immediately and
+active runs can be resumed after reloading the page.
 
 Background searches are dispatched by `.github/workflows/scheduled-searches.yml`
 at 00:17, 06:17, 12:17, and 18:17 UTC. GitHub schedules may be delayed; this is not

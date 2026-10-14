@@ -116,7 +116,9 @@ class SQLiteWorkspaceTests(unittest.TestCase):
 
     def test_jobs_are_durable_and_foreign_updates_are_inert(self):
         job = self.store.create_job("owner-a", "Find actual leads")
-        self.assertEqual(set(job), {"id", "status", "query", "created_at", "updated_at"})
+        self.assertEqual(set(job), {"id", "status", "query", "created_at", "updated_at", "kind", "conversation_id"})
+        self.assertEqual(job["kind"], "research")
+        self.assertEqual(job["conversation_id"], job["id"])
         self.assertEqual(job["status"], "queued")
         self.assertIsNone(self.store.get_job("owner-b", job["id"]))
         self.store.update_job("owner-b", job["id"], "failed", error="Foreign update")

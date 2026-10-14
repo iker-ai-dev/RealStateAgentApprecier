@@ -7,6 +7,16 @@ afterEach(() => {
 });
 
 describe("API contract", () => {
+  it("starts streamed chat and passes follow-up research context without changing the user message", async () => {
+    const fetch = vi.fn().mockImplementation(() => Promise.resolve(new Response(JSON.stringify({ id: "job", status: "queued" }))));
+    vi.stubGlobal("fetch", fetch);
+    await api.startChat({ message: "Hello", conversation_id: "saved" });
+    await api.research("Search again", undefined, "saved");
+    expect(fetch.mock.calls.map(([url, options]) => [url, options.method, JSON.parse(options.body)])).toEqual([
+      ["/api/chat/start", "POST", { message: "Hello", conversation_id: "saved" }],
+      ["/api/research", "POST", { query: "Search again", conversation_id: "saved" }],
+    ]);
+  });
   it("uses readable market titles without rewriting ordinary conversations", () => {
     expect(displayTitle("Research for me open-air shopping centers and strip centers for sale in Sacramento, CA, United States, with an asking pr")).toBe("Sacramento, CA · Retail research");
     expect(displayTitle("What evidence should I verify?")).toBe("What evidence should I verify?");

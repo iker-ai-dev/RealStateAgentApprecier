@@ -57,6 +57,7 @@ class _ResearchStream(StreamingResponse):
 
 class ResearchRequest(BaseModel):
     query: str = Field(min_length=3, max_length=2000)
+    conversation_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{32}$")
 
     @field_validator("query")
     @classmethod
@@ -244,13 +245,53 @@ def create_app(*, store=None, research_fn=None, analyze_fn=None):
     def scenario(payload: Scenario):
         return calculate_scenario(payload)
 
-    def run_research(owner, job_id, query, agent_id=None):
-        deadline = time.monotonic() + 300
+    def progress_reporter(owner, job_id):
+        activity = []
+        previous_leads = None
+        descriptions = {
+            "analyzing": "I am comparing the retrieved evidence and preparing an answer.",
+            "validating": "I am checking the answer's citations and numerical claims.",
+            "repairing": "Some claims need tighter citations. I am revising and checking them again.",
+        }
+
+        def report(event):
+            nonlocal previous_leads
+            if isinstance(event, str):
+                event = {"stage": event, "message": descriptions.get(event, "")}
+            stage = event.get("stage")
+            if stage not in {"searching", "inspecting", "followup", "planning", "analyzing", "validating", "repairing"}:
+                return
+            message = event.get("message", "")
+            if isinstance(message, str) and message.strip():
+                activity.append({"id": secrets.token_hex(8), "stage": stage,
+                                 "message": message[:800], "created_at": stamp(utc_now())})
+            found = event.get("leads")
+            if found == previous_leads:
+                found = None
+            updated = store.update_job(owner, job_id, "running", stage=stage,
+                                       activity=activity[-40:], leads=found,
+                                       expected_status="running")
+            if not updated:
+                raise RuntimeError("Run is no longer active.")
+            if found:
+                store.upsert_leads(owner, found)
+            if found is not None:
+                previous_leads = found
+        return report
+
+    def run_research(owner, job_id, query, agent_id=None, conversation_id=None, user_message=None,
+                     record_user=True):
+        deadline = time.monotonic() + 600
+        on_progress = progress_reporter(owner, job_id)
         try:
             if not store.update_job(owner, job_id, "running", expected_status="queued",
                                     stage="searching", started_at=datetime.now(timezone.utc).isoformat()):
                 return
-            found = research_fn(query)
+            on_progress({"stage": "searching", "message": "I am starting a live investigation with Nimble."})
+            retrieval_kwargs = {}
+            if "on_progress" in inspect.signature(research_fn).parameters:
+                retrieval_kwargs["on_progress"] = on_progress
+            found = research_fn(query, **retrieval_kwargs)
             if agent_id:
                 found = [dict(lead, agent_id=agent_id, job_id=job_id) for lead in found]
             if time.monotonic() >= deadline:
@@ -264,12 +305,9 @@ def create_app(*, store=None, research_fn=None, analyze_fn=None):
                 store.upsert_leads(owner, found)
                 store.update_job(owner, job_id, "running", leads=found, expected_status="running")
                 try:
-                    def on_progress(stage):
-                        if stage in {"analyzing", "validating", "repairing"}:
-                            store.update_job(owner, job_id, "running", stage=stage,
-                                             expected_status="running")
-
-                    kwargs = {"history": None}
+                    recent = store.messages(owner, conversation_id)[-8:] if conversation_id else []
+                    kwargs = {"history": [{"role": item["role"], "content": item["content"][:3000]}
+                                           for item in recent] or None}
                     # Explicit opt-in keeps legacy injected analyzers unchanged.
                     try:
                         parameters = inspect.signature(analyze_fn).parameters
@@ -293,8 +331,10 @@ def create_app(*, store=None, research_fn=None, analyze_fn=None):
                 current = store.get_job(owner, job_id)
                 if current is None or current["status"] != "running":
                     return
-                store.append_message(owner, job_id, "user", query)
-                store.append_message(owner, job_id, "assistant", report["answer"],
+                thread_id = conversation_id or job_id
+                if record_user:
+                    store.append_message(owner, thread_id, "user", user_message or query)
+                store.append_message(owner, thread_id, "assistant", report["answer"],
                                      metadata={key: report[key] for key in ("sources", "model", "usage") if key in report})
                 store.update_job(owner, job_id, "completed", leads=found, analysis=report, stage="completed",
                                  expected_status="running")
@@ -316,10 +356,27 @@ def create_app(*, store=None, research_fn=None, analyze_fn=None):
         if needs_nimble_key and not os.getenv("NIMBLE_API_KEY", "").strip():
             raise HTTPException(503, "Live discovery is unavailable: Nimble access is not configured.")
         owner = request.state.owner
+        query = payload.query
+        if payload.conversation_id:
+            previous = store.get_job(owner, payload.conversation_id)
+            messages = store.messages(owner, payload.conversation_id)
+            if previous is None and not messages:
+                raise HTTPException(404, "Conversation not found.")
+            if re.search(r"\b(more|better|again|further|these|those|that|them|deeper|additional|continue)\b",
+                         payload.query, re.IGNORECASE):
+                latest = next((job for job in store.list_jobs(owner)
+                               if job.get("kind") != "chat" and
+                               job.get("conversation_id", job["id"]) == payload.conversation_id), None)
+                context = latest["query"] if latest else (
+                    previous["query"] if previous and previous.get("kind") != "chat" else "")
+                if context:
+                    query = context[:1200] + "\nFollow-up request: " + payload.query
         gate.reserve(owner, request.client.host if request.client else "unknown", "research")
         try:
-            job = store.create_job(owner, payload.query)
-            executor.submit(run_research, owner, job["id"], payload.query)
+            job = store.create_job(owner, query, conversation_id=payload.conversation_id)
+            store.append_message(owner, job["conversation_id"], "user", payload.query)
+            executor.submit(run_research, owner, job["id"], query,
+                            conversation_id=payload.conversation_id, user_message=payload.query, record_user=False)
             return job
         except Exception:
             gate.release(owner, "research")
@@ -474,7 +531,7 @@ def create_app(*, store=None, research_fn=None, analyze_fn=None):
         if job["status"] in {"queued", "running"}:
             started = datetime.fromisoformat(job["created_at"])
             if ((datetime.now(timezone.utc) - started).total_seconds() > 600
-                    and not gate.is_active(owner, "research")):
+                    and not gate.is_active(owner, job.get("kind", "research"))):
                 store.update_job(owner, job_id, "failed", stage="failed",
                                  error="Research was interrupted or exceeded its deadline. Submit a new run to retry.",
                                  expected_status=job["status"])
@@ -498,7 +555,7 @@ def create_app(*, store=None, research_fn=None, analyze_fn=None):
     @app.get("/api/artifacts")
     def list_artifacts(request: Request):
         return {"schema_version": 1, "artifacts": [artifact_summary(job)
-                for job in store.list_jobs(request.state.owner)]}
+                for job in store.list_jobs(request.state.owner) if job.get("kind") != "chat"]}
 
     @app.get("/api/artifacts/{artifact_id}")
     def get_artifact(artifact_id: str, request: Request):
@@ -514,6 +571,12 @@ def create_app(*, store=None, research_fn=None, analyze_fn=None):
     @app.get("/api/research/{job_id}")
     def research_status(job_id: str, request: Request):
         return research_snapshot(request.state.owner, job_id)
+
+    @app.get("/api/runs")
+    def active_runs(request: Request):
+        owner = request.state.owner
+        runs = [research_snapshot(owner, job["id"]) for job in store.active_jobs(owner)]
+        return {"runs": [job for job in runs if job["status"] in {"queued", "running"}]}
 
     @app.get("/api/research/{job_id}/events")
     async def research_events(job_id: str, request: Request):
@@ -588,9 +651,7 @@ def create_app(*, store=None, research_fn=None, analyze_fn=None):
             raise HTTPException(404, "Conversation not found.")
         return {"id": conversation_id, "messages": messages}
 
-    @app.post("/api/chat")
-    def chat(payload: ChatRequest, request: Request):
-        owner = request.state.owner
+    def execute_chat(payload: ChatRequest, owner, on_progress=None, *, record_user=True):
         selected = []
         research_run = None
         if payload.lead_id:
@@ -600,22 +661,27 @@ def create_app(*, store=None, research_fn=None, analyze_fn=None):
         elif payload.conversation_id:
             # Research reports use their job ID as the conversation ID. Keep
             # follow-ups on that evidence instead of unrelated workspace history.
-            research_run = store.get_job(owner, payload.conversation_id)
+            research_run = next((job for job in store.list_jobs(owner)
+                                 if job.get("kind") != "chat" and
+                                 job.get("conversation_id", job["id"]) == payload.conversation_id), None)
+            if research_run is None:
+                research_run = store.get_job(owner, payload.conversation_id)
             if research_run and research_run.get('status') in ('completed', 'partial'):
                 selected = research_run.get('leads', [])
-        gate.reserve(owner, request.client.host if request.client else "unknown", "chat")
         conversation_id = payload.conversation_id or secrets.token_hex(16)
         try:
             messages = store.messages(owner, conversation_id)
-            if not payload.lead_id and research_run is None:
+            if not payload.lead_id:
                 # Reuse only this conversation's cited, owner-visible sources.
                 # Ordinary conversation must not inherit workspace inventory.
                 source_urls = {source['url'] for item in messages if item['role'] == 'assistant'
                                for source in item.get('sources', [])}
                 if source_urls:
-                    selected = [lead for lead in store.list_leads(owner) if lead['url'] in source_urls]
+                    cited = [lead for lead in store.list_leads(owner) if lead['url'] in source_urls]
+                    selected = list({lead['url']: lead for lead in [*selected, *cited]}.values())
+            history_messages = messages if record_user else messages[:-1]
             history = [{"role": item["role"], "content": item["content"][:3000]}
-                       for item in messages[-8:]]
+                       for item in history_messages[-8:]]
             kwargs = {"history": history}
             # Legacy injected analyzers need not implement conversational mode.
             try:
@@ -624,18 +690,68 @@ def create_app(*, store=None, research_fn=None, analyze_fn=None):
                 parameters = {}
             if "mode" in parameters:
                 kwargs["mode"] = "chat"
+            if "on_progress" in parameters and on_progress is not None:
+                kwargs["on_progress"] = on_progress
             if payload.scenario:
                 kwargs["scenario"] = calculate_scenario(payload.scenario)
             result = analyze_fn(payload.message, selected[:10], **kwargs)
-            store.append_message(owner, conversation_id, "user", payload.message)
+            if record_user:
+                store.append_message(owner, conversation_id, "user", payload.message)
             metadata = {key: result[key] for key in ("sources", "model", "usage") if key in result}
             store.append_message(owner, conversation_id, "assistant", result["answer"], metadata=metadata)
             return {**result, "conversation_id": conversation_id}
         except Exception as exc:
             capture_exception(exc)
             raise HTTPException(502, "The analysis provider is unavailable. Your message was not answered; please retry.") from None
+
+    def validate_chat_owner(payload, owner):
+        if payload.conversation_id and not (store.messages(owner, payload.conversation_id)
+                                           or store.get_job(owner, payload.conversation_id)):
+            raise HTTPException(404, "Conversation not found.")
+        if payload.lead_id and not any(lead["id"] == payload.lead_id for lead in store.list_leads(owner)):
+            raise HTTPException(404, "Lead not found in this workspace.")
+
+    @app.post("/api/chat")
+    def chat(payload: ChatRequest, request: Request):
+        owner = request.state.owner
+        validate_chat_owner(payload, owner)
+        gate.reserve(owner, request.client.host if request.client else "unknown", "chat")
+        try:
+            return execute_chat(payload, owner)
         finally:
             gate.release(owner, "chat")
+
+    def run_chat(owner, job_id, payload):
+        try:
+            if not store.update_job(owner, job_id, "running", expected_status="queued",
+                                    stage="analyzing", started_at=stamp(utc_now())):
+                return
+            progress = progress_reporter(owner, job_id)
+            progress({"stage": "analyzing", "message": "I am reading this chat and its saved sources."})
+            result = execute_chat(payload, owner, progress, record_user=False)
+            store.update_job(owner, job_id, "completed", analysis=result,
+                             stage="completed", expected_status="running")
+        except Exception as exc:
+            capture_exception(exc)
+            store.update_job(owner, job_id, "failed", stage="failed", expected_status="running",
+                             error="The analysis provider could not finish this answer. Please retry.")
+        finally:
+            gate.release(owner, "chat")
+
+    @app.post("/api/chat/start", status_code=202)
+    def start_chat(payload: ChatRequest, request: Request):
+        owner = request.state.owner
+        validate_chat_owner(payload, owner)
+        gate.reserve(owner, request.client.host if request.client else "unknown", "chat")
+        try:
+            job = store.create_job(owner, payload.message, kind="chat", conversation_id=payload.conversation_id)
+            payload = payload.model_copy(update={"conversation_id": job["conversation_id"]})
+            store.append_message(owner, job["conversation_id"], "user", payload.message)
+            executor.submit(run_chat, owner, job["id"], payload)
+            return job
+        except Exception:
+            gate.release(owner, "chat")
+            raise
 
     from app.workspace_mcp import create_workspace_mcp
     mcp = create_workspace_mcp(

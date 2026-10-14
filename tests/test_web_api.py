@@ -195,7 +195,10 @@ class WorkspaceApiTests(unittest.TestCase):
             self.assertNotIn('private-provider', result['error'])
             self.assertFalse(result.get('analysis'))
             self.assertEqual(client.get('/api/leads').json()['leads'][0]['id'], self.lead['id'])
-            self.assertEqual(client.get('/api/conversations').json()['conversations'], [])
+            saved = client.get('/api/conversations').json()['conversations']
+            self.assertEqual(saved[0]['id'], job['id'])
+            messages = client.get('/api/conversations/' + job['id']).json()['messages']
+            self.assertEqual([item['role'] for item in messages], ['user'])
             other = TestClient(app)
             self.assertEqual(other.get('/api/leads').json()['leads'], [])
             self.assertEqual(other.get('/api/research/' + job['id']).status_code, 404)

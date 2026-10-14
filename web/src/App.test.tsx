@@ -8,7 +8,7 @@ import {
   within,
 } from "@testing-library/react";
 import App, { messageIntent } from "./App";
-import { api, type Agent, type Lead, type ResearchResult } from "./api";
+import { api, type Agent, type Lead, type ResearchResult, type ChatResult } from "./api";
 import { Markdown } from "./Markdown";
 import { LeadDetails } from "./LeadDetails";
 import * as streams from "./researchStream";
@@ -20,6 +20,7 @@ beforeEach(() => {
     model: "API model",
   });
   vi.spyOn(api, "conversations").mockResolvedValue({ conversations: [] });
+  vi.spyOn(api, "runs").mockResolvedValue({ runs: [] });
   vi.spyOn(api, "agents").mockResolvedValue({ agents: [] });
   vi.spyOn(api, "artifacts").mockResolvedValue({ artifacts: [] });
 });
@@ -47,8 +48,61 @@ async function send(text: string) {
   });
   fireEvent.click(screen.getByRole("button", { name: "Send message" }));
 }
+function mockChat(result: ChatResult) {
+  vi.spyOn(streams, "streamResearch").mockResolvedValue({
+    id: "chat-job", status: "completed", leads: [],
+    conversation_id: result.conversation_id,
+    analysis: { answer: result.answer, sources: result.sources },
+  });
+  return vi.spyOn(api, "startChat").mockResolvedValue({ id: "chat-job", status: "queued" });
+}
 
 describe("chat-first workspace", () => {
+  it.each(["/", "/?conversation=restored"])("resumes an existing chat after reload at %s without resubmitting or duplicating the user turn", async (url) => {
+    window.history.replaceState({}, "", url);
+    vi.spyOn(api, "runs").mockResolvedValue({ runs: [{ id: "pending-job", conversation_id: "restored", kind: "chat", status: "running", leads: [] }] });
+    vi.spyOn(api, "conversation").mockResolvedValue({ id: "restored", messages: [{ role: "user", content: "Saved question" }] });
+    const start = vi.spyOn(api, "startChat");
+    const research = vi.spyOn(api, "research");
+    let finish!: (result: ResearchResult) => void;
+    const stream = vi.spyOn(streams, "streamResearch").mockImplementation((_id, _signal, update) => {
+      update({ id: "pending-job", status: "running", stage: "validating", leads: [], activity: [{ id: "a", stage: "validating", message: "Checking saved evidence", created_at: "2026-10-13T20:00:00Z" }] });
+      return new Promise((resolve) => { finish = resolve; });
+    });
+    render(<App />);
+    await screen.findByText("Checking saved evidence");
+    expect(screen.getAllByText("Saved question")).toHaveLength(1);
+    expect(screen.getByRole("button", { name: "New chat" })).toBeDisabled();
+    expect(stream).toHaveBeenCalledWith("pending-job", expect.any(AbortSignal), expect.any(Function));
+    fireEvent.click(screen.getByRole("button", { name: "Artifacts" }));
+    act(() => finish({ id: "pending-job", conversation_id: "restored", status: "completed", leads: [], analysis: { answer: "Recovered answer", sources: [] } }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "New chat" })).toBeEnabled());
+    expect(screen.getByRole("region", { name: "Artifacts" })).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Chats" }));
+    expect(screen.getByText("Recovered answer")).toBeVisible();
+    expect(screen.getAllByText("Saved question")).toHaveLength(1);
+    expect(window.location.search).toBe("?conversation=restored");
+    expect(start).not.toHaveBeenCalled();
+    expect(research).not.toHaveBeenCalled();
+  });
+  it("does not replace a selected unrelated conversation with an active run", async () => {
+    window.history.replaceState({}, "", "/?conversation=selected");
+    vi.spyOn(api, "runs").mockResolvedValue({ runs: [{ id: "pending-job", conversation_id: "other", kind: "chat", status: "running", leads: [] }] });
+    vi.spyOn(api, "conversation").mockResolvedValue({ id: "selected", messages: [{ role: "assistant", content: "Selected chat" }] });
+    const stream = vi.spyOn(streams, "streamResearch");
+    render(<App />);
+    await screen.findByText("Selected chat");
+    expect(stream).not.toHaveBeenCalled();
+    expect(window.location.search).toBe("?conversation=selected");
+  });
+  it("blocks paid submission when active-run recovery is unavailable", async () => {
+    vi.spyOn(api, "runs").mockRejectedValue(new Error("Temporarily offline"));
+    const start = vi.spyOn(api, "startChat");
+    render(<App />);
+    await screen.findByText(/Could not restore active work/);
+    expect(screen.getByRole("button", { name: "Send message" })).toBeDisabled();
+    expect(start).not.toHaveBeenCalled();
+  });
   it("preserves a near-limit draft when filters exceed the payload limit and allows retry without filters", async () => {
     const research = vi.spyOn(api, "research").mockResolvedValue({ id: "r1", status: "queued" });
     const chat = vi.spyOn(api, "chat");
@@ -69,7 +123,7 @@ describe("chat-first workspace", () => {
     expect(schedule).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("checkbox", { name: "Search filters: On" }));
     fireEvent.click(screen.getByRole("button", { name: "Send message" }));
-    await waitFor(() => expect(research).toHaveBeenCalledWith(draft, expect.any(AbortSignal)));
+    await waitFor(() => expect(research).toHaveBeenCalledWith(draft, expect.any(AbortSignal), undefined));
     await waitFor(() => expect(screen.getByRole("button", { name: "New chat" })).toBeEnabled());
     expect(screen.queryByRole("alert")).toBeNull();
   });
@@ -80,10 +134,14 @@ describe("chat-first workspace", () => {
     const sidebar = screen.getByLabelText("Workspace sidebar");
     expect(within(sidebar).getAllByText("Chats")).toHaveLength(1);
     expect(within(sidebar).queryByText("Conversations")).toBeNull();
+    expect(screen.getByRole("button", { name: "Chats" })).toHaveAttribute("aria-expanded", "false");
+    expect(screen.getByLabelText("Past conversations")).not.toBeVisible();
     expect(within(screen.getByRole("navigation", { name: "Main workspace" })).getAllByRole("button")).toHaveLength(2);
     expect(screen.getByRole("checkbox", { name: "Search filters: Off" })).not.toBeChecked();
     fireEvent.click(screen.getByRole("button", { name: "Artifacts" }));
     fireEvent.click(screen.getByRole("button", { name: "Chats" }));
+    expect(screen.getByRole("button", { name: "Chats" })).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByLabelText("Past conversations")).toBeVisible();
     expect(screen.getByRole("region", { name: "Research chat" })).toBeVisible();
   });
 
@@ -112,7 +170,7 @@ describe("chat-first workspace", () => {
   });
 
   it.each(["hi", "What risks should I verify?"])("keeps %s in free chat even with filters enabled", async (message) => {
-    const chat = vi.spyOn(api, "chat").mockResolvedValue({ conversation_id: "c1", answer: "Chat reply", sources: [] });
+    const chat = mockChat({ conversation_id: "c1", answer: "Chat reply", sources: [] });
     const research = vi.spyOn(api, "research");
     const schedule = vi.spyOn(api, "agentDraft");
     render(<App />);
@@ -134,7 +192,7 @@ describe("chat-first workspace", () => {
   });
 
   it.each(["Find shopping centers", "Schedule a background agent", "Use research prompt"])("routes an edited %s suggestion naturally", async (suggestion) => {
-    const chat = vi.spyOn(api, "chat").mockResolvedValue({ conversation_id: "c1", answer: "Hello there", sources: [] });
+    const chat = mockChat({ conversation_id: "c1", answer: "Hello there", sources: [] });
     const research = vi.spyOn(api, "research");
     const schedule = vi.spyOn(api, "agentDraft");
     render(<App />);
@@ -174,7 +232,8 @@ describe("chat-first workspace", () => {
 
   it("keeps late chat replies in their thread without leaving Artifacts", async () => {
     let finish!: (result: any) => void;
-    vi.spyOn(api, "chat").mockImplementation(
+    vi.spyOn(api, "startChat").mockResolvedValue({ id: "chat-job", status: "queued" });
+    vi.spyOn(streams, "streamResearch").mockImplementation(
       () =>
         new Promise((resolve) => {
           finish = resolve;
@@ -182,10 +241,11 @@ describe("chat-first workspace", () => {
     );
     render(<App />);
     await send("Evaluate the evidence");
+    await waitFor(() => expect(finish).toBeDefined());
     expect(screen.getByRole("button", { name: "New chat" })).toBeDisabled();
     fireEvent.click(screen.getByRole("button", { name: "Artifacts" }));
     act(() =>
-      finish({ conversation_id: "c1", answer: "Late answer", sources: [] }),
+      finish({ id: "chat-job", status: "completed", leads: [], conversation_id: "c1", analysis: { answer: "Late answer", sources: [] } }),
     );
     await waitFor(() =>
       expect(
@@ -250,7 +310,7 @@ describe("chat-first workspace", () => {
     expect(screen.getByRole("button", { name: "Send message" })).toBeDisabled();
   });
   it("renders markdown headings, lists and tables in the main chat", async () => {
-    vi.spyOn(api, "chat").mockResolvedValue({
+    mockChat({
       conversation_id: "c1",
       answer:
         "## Evidence\n\n**Source reported**\n\n- Verify leases\n\n| Metric | Value |\n|---|---|\n| Area | Not provided |",
@@ -263,7 +323,7 @@ describe("chat-first workspace", () => {
     expect(screen.getByText("Source reported").tagName).toBe("STRONG");
   });
   it("preserves the response and draft across sidebar navigation", async () => {
-    vi.spyOn(api, "chat").mockResolvedValue({
+    mockChat({
       conversation_id: "c1",
       answer: "Saved answer",
       sources: [],
@@ -291,12 +351,13 @@ describe("chat-first workspace", () => {
       id: "saved",
       messages: [{ role: "assistant", content: "Previous analysis" }],
     });
-    const chat = vi.spyOn(api, "chat").mockResolvedValue({
+    const chat = mockChat({
       conversation_id: "saved",
       answer: "Continued analysis",
       sources: [],
     });
     render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: "Chats" }));
     fireEvent.click(
       await screen.findByRole("button", { name: "Prior research" }),
     );
@@ -326,6 +387,7 @@ describe("chat-first workspace", () => {
       })
       .mockImplementationOnce(() => new Promise(() => {}));
     render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: "Chats" }));
     fireEvent.click(await screen.findByRole("button", { name: "First" }));
     await screen.findByText("First answer");
     fireEvent.click(screen.getByRole("button", { name: "Second" }));
@@ -386,6 +448,54 @@ describe("chat-first workspace", () => {
       expect.any(AbortSignal),
     );
   });
+  it("streams chat activity before its verified answer and adopts the final conversation exactly once", async () => {
+    const start = vi.spyOn(api, "startChat").mockResolvedValue({ id: "chat-job", status: "queued" });
+    const legacy = vi.spyOn(api, "chat");
+    let update!: (result: ResearchResult) => void;
+    let finish!: (result: ResearchResult) => void;
+    vi.spyOn(streams, "streamResearch").mockImplementation((_id, _signal, onUpdate) => {
+      update = onUpdate;
+      return new Promise((resolve) => { finish = resolve; });
+    });
+    render(<App />);
+    await send("Explain the evidence");
+    await waitFor(() => expect(update).toBeDefined());
+    const first = { id: "1", stage: "analyzing", message: "Reviewing the saved evidence.", created_at: "2026-10-13T20:00:00Z" };
+    const second = { id: "2", stage: "validating", message: "Checking the source citations.", created_at: "2026-10-13T20:00:01Z" };
+    act(() => update({ id: "chat-job", status: "running", stage: "validating", leads: [], activity: [second, first, first] }));
+    const log = screen.getByRole("log", { name: "Live agent activity" });
+    expect(within(log).getAllByRole("listitem").map((item) => item.textContent)).toEqual([
+      expect.stringContaining(first.message), expect.stringContaining(second.message),
+    ]);
+    expect(screen.queryByText("Verified reply")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Artifacts" }));
+    fireEvent.click(screen.getByRole("button", { name: "Chats" }));
+    expect(screen.getByText(second.message)).toBeVisible();
+    act(() => finish({ id: "chat-job", conversation_id: "saved-chat", status: "completed", leads: [], analysis: { answer: "Verified reply", sources: [] } }));
+    await screen.findByText("Verified reply");
+    expect(screen.getAllByText("Explain the evidence")).toHaveLength(1);
+    expect(window.location.search).toBe("?conversation=saved-chat");
+    expect(screen.queryByRole("button", { name: /Research document/ })).toBeNull();
+    expect(start).toHaveBeenCalledOnce();
+    expect(legacy).not.toHaveBeenCalled();
+  });
+  it("keeps follow-up searches in their existing chat without losing or duplicating turns", async () => {
+    window.history.replaceState({}, "", "/?conversation=saved");
+    vi.spyOn(api, "conversation").mockResolvedValue({ id: "saved", messages: [
+      { role: "user", content: "Find shopping centers in Phoenix" },
+      { role: "assistant", content: "Prior analysis" },
+    ] });
+    const research = vi.spyOn(api, "research").mockResolvedValue({ id: "followup-job", status: "queued" });
+    vi.spyOn(streams, "streamResearch").mockResolvedValue({ id: "followup-job", conversation_id: "saved", status: "completed", leads: [], analysis: { answer: "New verified findings", sources: [] } });
+    render(<App />);
+    await screen.findByText("Prior analysis");
+    await send("Can you search for better resources?");
+    await screen.findByText("New verified findings");
+    expect(research).toHaveBeenCalledWith("Can you search for better resources?", expect.any(AbortSignal), "saved");
+    expect(screen.getByText("Prior analysis")).toBeVisible();
+    expect(screen.getAllByText("Can you search for better resources?")).toHaveLength(1);
+    expect(window.location.search).toBe("?conversation=saved");
+  });
   it("keeps partial research separate from an old answer and saves its artifact link", async () => {
     window.history.replaceState({}, "", "/?conversation=old");
     vi.spyOn(api, "conversation").mockResolvedValue({
@@ -406,7 +516,7 @@ describe("chat-first workspace", () => {
     await screen.findByText("Old answer");
     await send("Find retail centers in Phoenix");
     await screen.findByText("Evidence check needs attention");
-    expect(screen.queryByText("Old answer")).not.toBeInTheDocument();
+    expect(screen.getByText("Old answer")).toBeVisible();
     expect(
       screen.getByRole("button", { name: /Research document/ }),
     ).toBeVisible();
@@ -510,7 +620,7 @@ describe("chat-first workspace", () => {
     expect(screen.getByRole("checkbox", { name: "Search filters: On" })).toBeChecked();
   });
   it("offers a new empty conversation without deleting previous history", async () => {
-    vi.spyOn(api, "chat").mockResolvedValue({
+    mockChat({
       conversation_id: "c1",
       answer: "Retained answer",
       sources: [],
@@ -547,6 +657,10 @@ it("routes explicit research and scheduling requests and respects a manual mode"
   );
   expect(messageIntent("Which risks need more research?", "auto")).toBe("ask");
   expect(messageIntent("Explain what background agents do", "ask")).toBe("ask");
+});
+it.each(["Can you search for better resources?", "Search again", "Please investigate further", "Find additional evidence"])("recognizes investigative follow-ups: %s", (message) => {
+  expect(messageIntent(message, "auto")).toBe("research");
+  expect(messageIntent(message, "ask")).toBe("ask");
 });
 it.each([
   "how do background agents work?",
