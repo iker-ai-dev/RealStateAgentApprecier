@@ -686,6 +686,17 @@ svg {
   display: flex;
   gap: 18px;
 }
+.provider-connections { position: relative; display: flex; align-items: center; gap: 8px; }
+.provider small { display: block; font-size: 10px; color: var(--muted); line-height: 1.3; }
+.provider.configured .status-dot { background: #dfbf78; }
+.provider.error .status-dot, .provider.not_configured .status-dot { background: var(--coral); }
+.provider-check-error { position: absolute; right: 0; top: 100%; width: min(300px, 80vw); padding: 12px; background: var(--panel); color: var(--coral); border: 1px solid var(--line); z-index: 20; }
+@media (max-width: 520px) {
+  .chat-first .app-header { flex-wrap: wrap; height: 104px; padding: 8px 14px; gap: 8px; }
+  .chat-first .header-right { width: 100%; justify-content: flex-end; }
+  .chat-first .workspace-shell { height: calc(100dvh - 104px); }
+  .chat-first .workspace-sidebar { top: 104px; }
+}
 .provider {
   display: flex;
   align-items: center;

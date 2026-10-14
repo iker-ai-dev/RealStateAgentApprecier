@@ -37,6 +37,7 @@ import { AgentsWorkspace } from "./AgentsWorkspace";
 import { ArtifactsWorkspace } from "./ArtifactsWorkspace";
 import { streamResearch } from "./researchStream";
 import { ResearchProgress } from "./ResearchProgress";
+import { ProviderConnections } from "./ProviderConnections";
 
 type Message = {
   id: string;
@@ -584,7 +585,7 @@ export default function App() {
           </span>
         </a>
         <div className="header-right">
-          <span className="header-label">Research workspace</span>
+          <ProviderConnections status={providers} />
           <a
             href="/landing"
             className="connection-link"
