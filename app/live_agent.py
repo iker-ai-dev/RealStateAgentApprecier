@@ -576,12 +576,12 @@ def _validate_citations_once(state: State, *, paragraph_offset: int = 0) -> dict
     if state.get('scenario') is not None:
         scenario = state['scenario']
         metrics = state['scenario_metrics']
-        basis = (f"Basis: {counts}, unverified snippets. " + scenario['basis'] +
+        basis = (f"Basis: {counts}, unverified source excerpts. " + scenario['basis'] +
                  f" Computed scenario: IRR {metrics.get('irr', 'undefined / not unique')}; "
                  f"equity multiple {metrics['equity_multiple']}; initial equity {metrics['initial_equity']}. "
                  'Excludes: ' + ', '.join(scenario['exclusions']) + '.')
     else:
-        basis = f"Basis: {counts}, unverified snippets; no financial scenario supplied."
+        basis = f"Basis: {counts}, unverified source excerpts; no financial scenario supplied."
     if any(paragraph['kind'] != 'conversation' for paragraph in paragraphs):
         rendered.append(basis)
     return {"result": {"answer": "\n\n".join(rendered),
