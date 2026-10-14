@@ -477,6 +477,24 @@ class WorkspaceStore(_StoreInterface):
                 (_identifier(owner, "Owner"), MAX_READ_RECORDS)).fetchall()
         return [_job(row[0], row[1]) for row in rows]
 
+    def list_agent_jobs(self, owner: str, agent_id: str) -> list[dict]:
+        """Latest 100 runs for one owned agent, including legacy lead provenance."""
+        owner = _identifier(owner, "Owner")
+        agent_id = _identifier(agent_id, "Agent ID")
+        with closing(self._connect()) as connection:
+            rows = connection.execute(
+                "SELECT payload, updated_at FROM jobs WHERE owner=? "
+                "AND json_extract(payload, '$.status') IN ('queued', 'running', 'completed', 'partial', 'failed') "
+                "AND (json_extract(payload, '$.agent_id')=? OR ("
+                "NULLIF(json_extract(payload, '$.agent_id'), '') IS NULL AND id IN ("
+                "SELECT legacy.id FROM jobs AS legacy, json_each(legacy.payload, '$.leads') AS lead "
+                "WHERE legacy.owner=? AND NULLIF(json_extract(lead.value, '$.agent_id'), '') IS NOT NULL "
+                "GROUP BY legacy.id HAVING COUNT(DISTINCT json_extract(lead.value, '$.agent_id'))=1 "
+                "AND MAX(json_extract(lead.value, '$.agent_id'))=?))) "
+                "ORDER BY json_extract(payload, '$.created_at') DESC, id DESC LIMIT ?",
+                (owner, agent_id, owner, agent_id, 100)).fetchall()
+        return [_job(row[0], row[1]) for row in rows]
+
     def active_jobs(self, owner: str) -> list[dict]:
         with closing(self._connect()) as connection:
             rows = connection.execute(
@@ -848,6 +866,28 @@ class SnowflakeWorkspaceStore(_StoreInterface):
                 "WHERE record_type=? AND owner=? AND payload:status::STRING IN (?, ?) "
                 "ORDER BY payload:created_at::STRING DESC, id DESC LIMIT ?",
                 params=["job", _identifier(owner, "Owner"), "completed", "partial", MAX_READ_RECORDS],
+            ).collect(statement_params={"STATEMENT_TIMEOUT_IN_SECONDS": "30"}, log_on_exception=False)
+        return [_job(row[0], row[1]) for row in rows]
+
+    def list_agent_jobs(self, owner: str, agent_id: str) -> list[dict]:
+        """Same agent-scoped, all-state history as the SQLite adapter."""
+        owner = _identifier(owner, "Owner")
+        agent_id = _identifier(agent_id, "Agent ID")
+        with self._session() as session:
+            rows = session.sql(
+                "SELECT payload, updated_at FROM RETAILSCOPE_WORKSPACE_RECORDS "
+                "WHERE record_type=? AND owner=? "
+                "AND payload:status::STRING IN (?, ?, ?, ?, ?) "
+                "AND (payload:agent_id::STRING=? OR (NULLIF(payload:agent_id::STRING, '') IS NULL AND id IN ("
+                "SELECT legacy.id FROM RETAILSCOPE_WORKSPACE_RECORDS AS legacy, "
+                "LATERAL FLATTEN(input => legacy.payload:leads) AS lead "
+                "WHERE legacy.record_type=? AND legacy.owner=? "
+                "AND NULLIF(lead.value:agent_id::STRING, '') IS NOT NULL "
+                "GROUP BY legacy.id HAVING COUNT(DISTINCT lead.value:agent_id::STRING)=1 "
+                "AND MAX(lead.value:agent_id::STRING)=?))) "
+                "ORDER BY payload:created_at::STRING DESC, id DESC LIMIT ?",
+                params=["job", owner, "queued", "running", "completed", "partial", "failed",
+                        agent_id, "job", owner, agent_id, 100],
             ).collect(statement_params={"STATEMENT_TIMEOUT_IN_SECONDS": "30"}, log_on_exception=False)
         return [_job(row[0], row[1]) for row in rows]
 

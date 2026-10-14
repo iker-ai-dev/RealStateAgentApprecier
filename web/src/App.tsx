@@ -23,6 +23,7 @@ import {
   displayTitle,
   safeUrl,
   type AgentInput,
+  type Agent,
   type CalculatedScenario,
   type ChatResult,
   type ConversationSummary,
@@ -108,6 +109,11 @@ export default function App() {
   const [path, setPath] = useState(window.location.pathname);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [historyExpanded, setHistoryExpanded] = useState(false);
+  const [agentsExpanded, setAgentsExpanded] = useState(false);
+  const [selectedAgentId, setSelectedAgentId] = useState<string>();
+  const [agents, setAgents] = useState<Agent[]>([]);
+  const [agentsLoading, setAgentsLoading] = useState(false);
+  const [agentsError, setAgentsError] = useState("");
   const [activeId, setActiveId] = useState(
     () =>
       new URLSearchParams(window.location.search).get("conversation") || "new",
@@ -386,20 +392,45 @@ export default function App() {
       bottom.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [progress?.activity?.length, progress?.leads.length, progress?.stage, activeId, progress?.key]);
 
+  useEffect(() => {
+    if (!ready || !agentsExpanded) return;
+    const pending = new AbortController();
+    setAgentsLoading(true);
+    setAgentsError("");
+    api.agents(pending.signal).then(({ agents }) => {
+      if (!pending.signal.aborted) setAgents(agents);
+    }).catch((error) => {
+      if (!pending.signal.aborted) setAgentsError(errorMessage(error));
+    }).finally(() => {
+      if (!pending.signal.aborted) setAgentsLoading(false);
+    });
+    return () => pending.abort();
+  }, [ready, agentsExpanded, agentVersion]);
+
+  function selectAgent(id?: string) {
+    setSelectedAgentId(id);
+    setSection("agents");
+    setSidebarOpen(false);
+  }
+
   async function send(event: FormEvent) {
     event.preventDefault();
+    await submitMessage(draft);
+  }
+
+  async function submitMessage(text: string, fresh = false) {
     if (
       !ready ||
-      !draft.trim() ||
+      !text.trim() ||
       controller.current ||
-      threadLoading ||
-      conversation.unavailable
+      agentSaving ||
+      (!fresh && (threadLoading || conversation.unavailable))
     )
       return;
-    const intent = messageIntent(draft.trim(), mode);
-    const message = intent === "research" && filtersEnabled && !(generatedPrompt && draft.includes(generatedPrompt))
-      ? `${draft.trim()}\n\nSearch filters:\n${searchPrompt(criteria)}`
-      : draft.trim();
+    const intent = messageIntent(text.trim(), fresh ? "research" : mode);
+    const message = !fresh && intent === "research" && filtersEnabled && !(generatedPrompt && text.includes(generatedPrompt))
+      ? `${text.trim()}\n\nSearch filters:\n${searchPrompt(criteria)}`
+      : text.trim();
     if (message.length > 2000) {
       updateThread(activeId, (current) => ({
         ...current,
@@ -408,7 +439,12 @@ export default function App() {
       return;
     }
     const pending = new AbortController();
-    let key = activeId;
+    let key = fresh ? "new" : activeId;
+    const conversationId = fresh ? undefined : conversation.id;
+    if (fresh) {
+      newChat();
+      activeThread.current = "new";
+    }
     controller.current = pending;
     setMode("auto");
     setBusyKey(key);
@@ -427,15 +463,15 @@ export default function App() {
       if (intent === "research" || intent === "ask") {
         setProgress({ key, stage: "queued", started: Date.now(), leads: [] });
         const job = intent === "research"
-          ? await api.research(message, pending.signal, conversation.id)
+          ? await api.research(message, pending.signal, conversationId)
           : await api.startChat({
               message,
-              ...(scenarios[key] ? { scenario: scenarios[key]!.input } : {}),
-              ...(conversation.id ? { conversation_id: conversation.id } : {}),
+              ...(!fresh && scenarios[key] ? { scenario: scenarios[key]!.input } : {}),
+              ...(conversationId ? { conversation_id: conversationId } : {}),
             }, pending.signal);
         if (pending.signal.aborted) return;
         const previousKey = key;
-        key = ("conversation_id" in job && typeof job.conversation_id === "string" ? job.conversation_id : undefined) || conversation.id || job.id;
+        key = ("conversation_id" in job && typeof job.conversation_id === "string" ? job.conversation_id : undefined) || conversationId || job.id;
         const currentThread = cache.current[previousKey];
         updateThread(key, () => ({
           ...currentThread,
@@ -488,7 +524,7 @@ export default function App() {
       } else if (intent === "schedule") {
         const result = await api.agentDraft(
           message,
-          conversation.id,
+          conversationId,
           pending.signal,
         );
         if (pending.signal.aborted) return;
@@ -619,7 +655,6 @@ export default function App() {
             {(
               [
                 ["artifacts", FileText, "Artifacts"],
-                ["agents", Bot, "Agents"],
               ] as const
             ).map(([id, Icon, label]) => (
               <button
@@ -635,6 +670,25 @@ export default function App() {
               </button>
             ))}
           </nav>
+          <div className="sidebar-heading">
+            <button className="chats-heading-button" aria-expanded={agentsExpanded} aria-controls="agent-menu"
+              aria-current={section === "agents" ? "page" : undefined}
+              onClick={() => setAgentsExpanded((value) => !value)}>
+              <Bot size={16} />Agents
+              <ChevronRight size={14} className={agentsExpanded ? "history-chevron expanded" : "history-chevron"} />
+            </button>
+            {agentsExpanded && <button className="icon-button" aria-label="New agent" title="New agent"
+              onClick={() => selectAgent()}><Plus size={15} /></button>}
+          </div>
+          <div id="agent-menu" className="conversation-menu agent-menu" hidden={!agentsExpanded} aria-label="Scheduled agents">
+            {agentsLoading && !agents.length && <p className="muted">Loading agents...</p>}
+            {agentsError && <Notice retry={() => setAgentVersion((value) => value + 1)}>{agentsError}</Notice>}
+            {!agentsLoading && !agentsError && !agents.length && <p className="muted">No scheduled agents</p>}
+            {agents.map((agent) => <button key={agent.id} onClick={() => selectAgent(agent.id)}
+              aria-current={section === "agents" && selectedAgentId === agent.id ? "page" : undefined}>
+              <Bot size={14} /><span>{agent.name}<small>{agent.enabled ? `Every ${agent.cadence_hours}h` : "Paused"}</small></span>
+            </button>)}
+          </div>
           <div className="sidebar-heading">
             <button
               className="chats-heading-button"
@@ -722,6 +776,11 @@ export default function App() {
               ready={ready}
               active={!isMcp && section === "agents"}
               refreshKey={agentVersion}
+              selectedId={selectedAgentId}
+              chatBusy={Boolean(busyKey) || agentSaving}
+              onAgentsChanged={() => setAgentVersion((value) => value + 1)}
+              onSelectAgent={selectAgent}
+              onStartChat={(prompt) => { void submitMessage(prompt, true); }}
               onOpenReport={openArtifact}
               onResearchLead={(lead) => {
                 setSection("chats");

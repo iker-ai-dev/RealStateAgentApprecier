@@ -22,6 +22,7 @@ beforeEach(() => {
   vi.spyOn(api, "conversations").mockResolvedValue({ conversations: [] });
   vi.spyOn(api, "runs").mockResolvedValue({ runs: [] });
   vi.spyOn(api, "agents").mockResolvedValue({ agents: [] });
+  vi.spyOn(api, "agentRuns").mockResolvedValue({ runs: [] });
   vi.spyOn(api, "artifacts").mockResolvedValue({ artifacts: [] });
 });
 const agent: Agent = {
@@ -58,6 +59,27 @@ function mockChat(result: ChatResult) {
 }
 
 describe("chat-first workspace", () => {
+  it("keeps agents collapsed and starts a fresh prompted chat from a selected agent", async () => {
+    window.history.replaceState({}, "", "/?conversation=old");
+    vi.spyOn(api, "conversation").mockResolvedValue({ id: "old", messages: [{ role: "assistant", content: "Old conversation" }] });
+    vi.spyOn(api, "agents").mockResolvedValue({ agents: [agent] });
+    const research = vi.spyOn(api, "research").mockResolvedValue({ id: "new-job", status: "queued" });
+    vi.spyOn(streams, "streamResearch").mockResolvedValue({ id: "new-job", conversation_id: "fresh", status: "completed", leads: [], analysis: { answer: "Fresh result", sources: [] } });
+    render(<App />);
+    await screen.findByText("Old conversation");
+    const agentsButton = screen.getByRole("button", { name: "Agents" });
+    expect(agentsButton).toHaveAttribute("aria-expanded", "false");
+    expect(api.agents).not.toHaveBeenCalled();
+    fireEvent.click(agentsButton);
+    expect(screen.getByText("Old conversation")).toBeVisible();
+    fireEvent.click(await screen.findByRole("button", { name: /Phoenix watch/ }));
+    await screen.findByRole("heading", { name: "Run history" });
+    fireEvent.click(screen.getByRole("button", { name: "New chat from agent" }));
+    await screen.findByText("Fresh result");
+    expect(research).toHaveBeenCalledExactlyOnceWith(agent.query, expect.any(AbortSignal), undefined);
+    expect(screen.queryByText("Old conversation")).not.toBeInTheDocument();
+    expect(window.location.search).toBe("?conversation=fresh");
+  });
   it.each(["/", "/?conversation=restored"])("resumes an existing chat after reload at %s without resubmitting or duplicating the user turn", async (url) => {
     window.history.replaceState({}, "", url);
     vi.spyOn(api, "runs").mockResolvedValue({ runs: [{ id: "pending-job", conversation_id: "restored", kind: "chat", status: "running", leads: [] }] });
@@ -136,7 +158,7 @@ describe("chat-first workspace", () => {
     expect(within(sidebar).queryByText("Conversations")).toBeNull();
     expect(screen.getByRole("button", { name: "Chats" })).toHaveAttribute("aria-expanded", "false");
     expect(screen.getByLabelText("Past conversations")).not.toBeVisible();
-    expect(within(screen.getByRole("navigation", { name: "Main workspace" })).getAllByRole("button")).toHaveLength(2);
+    expect(within(screen.getByRole("navigation", { name: "Main workspace" })).getAllByRole("button")).toHaveLength(1);
     expect(screen.getByRole("checkbox", { name: "Search filters: Off" })).not.toBeChecked();
     fireEvent.click(screen.getByRole("button", { name: "Artifacts" }));
     fireEvent.click(screen.getByRole("button", { name: "Chats" }));
