@@ -5,7 +5,13 @@ class StreamUnavailable extends Error {}
 
 export const stageLabel = (stage: string) =>
   ({
-    queued: "Queued for research",
+    queued: "Getting started",
+    planning: "Planning the investigation",
+    inspecting: "Inspecting source details",
+    followup: "Following up on evidence gaps",
+    reading: "Reading source details",
+    investigating: "Investigating evidence gaps",
+    following_up: "Following up on missing evidence",
     searching: "Searching public listings",
     running: "Researching listings",
     analyzing: "Analyzing retrieved evidence",
@@ -21,7 +27,7 @@ export async function streamResearch(
   signal: AbortSignal,
   onUpdate: (result: ResearchResult) => void,
 ): Promise<ResearchResult> {
-  const pending = requestSignal(signal, 330_000);
+  const pending = requestSignal(signal, 630_000);
   try {
     if (typeof EventSource !== "undefined") {
       try {
@@ -96,7 +102,7 @@ export async function streamResearch(
       pending.signal,
       () => {},
       2000,
-      150,
+      316,
       onUpdate,
     );
   } finally {

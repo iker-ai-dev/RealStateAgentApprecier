@@ -108,6 +108,13 @@ export const researchSchema = z.object({
   stage: z.string().nullish(),
   started_at: z.string().nullish(),
   updated_at: z.string().nullish(),
+  conversation_id: z.string().nullish(),
+  activity: z.array(z.object({
+    id: z.string(),
+    stage: z.string(),
+    message: z.string(),
+    created_at: z.string(),
+  })).optional(),
 });
 export type ResearchResult = z.infer<typeof researchSchema>;
 const chatSchema = z.object({
@@ -224,6 +231,14 @@ async function request<S extends z.ZodTypeAny>(
 }
 
 export const api = {
+  runs: (signal?: AbortSignal) => request("/runs", z.object({
+    runs: z.array(researchSchema.extend({
+      conversation_id: z.string(),
+      kind: z.enum(["chat", "research"]),
+      query: z.string().optional(),
+      agent_id: z.string().nullish(),
+    })),
+  }), signal),
   agentDraft: async (
     message: string,
     conversationId?: string,
@@ -293,15 +308,19 @@ export const api = {
   status: (signal?: AbortSignal) => request("/status", statusSchema, signal),
   leads: (signal?: AbortSignal) =>
     request("/leads", z.object({ leads: z.array(leadSchema) }), signal),
-  research: (query: string, signal?: AbortSignal) =>
+  research: (query: string, signal?: AbortSignal, conversationId?: string) =>
     request(
       "/research",
       z.object({ id: z.string(), status: z.string() }),
       signal,
-      { query },
+      { query, ...(conversationId ? { conversation_id: conversationId } : {}) },
     ),
   researchResult: (id: string, signal?: AbortSignal) =>
     request(`/research/${encodeURIComponent(id)}`, researchSchema, signal),
+  startChat: (
+    body: { message: string; lead_id?: string; conversation_id?: string; scenario?: ScenarioInput },
+    signal?: AbortSignal,
+  ) => request("/chat/start", z.object({ id: z.string(), status: z.string(), conversation_id: z.string().optional(), kind: z.literal("chat").optional() }), signal, body),
   chat: (
     body: {
       message: string;

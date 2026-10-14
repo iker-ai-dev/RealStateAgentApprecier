@@ -5,7 +5,7 @@ import unittest
 from unittest.mock import patch
 
 from app.live_discovery import MAX_EXCERPTS, MAX_TEXT, _search_brief, normalize_evidence, research
-from nimble_mcp import IntegrationError, MCP_URL
+from nimble_mcp import IntegrationError, MCP_URL, NimbleMCP
 
 STAMP = "2026-10-12T12:00:00+00:00"
 RECORD = {"title": "Synthetic retail center", "url": "https://broker.example/center",
@@ -56,7 +56,7 @@ class FixtureSession:
                                      "include_answer": {"type": "boolean"}},
                                      "required": ["query", "max_results"], "additionalProperties": False}}]}
         elif method == "tools/call":
-            result = next(self.outputs)
+            result = next(self.outputs, {"content": [], "structuredContent": {"results": []}})
         else:
             raise AssertionError("Unexpected MCP operation")
         return Response({"jsonrpc": "2.0", "id": json["id"], "result": result})
@@ -129,6 +129,11 @@ class EvidenceTests(unittest.TestCase):
 
 
 class ResearchTests(unittest.TestCase):
+    def setUp(self):
+        planner = patch("app.live_discovery.plan_followups", return_value=[])
+        self.planner = planner.start()
+        self.addCleanup(planner.stop)
+
     def test_verbose_acquisition_request_keeps_market_types_and_budget(self):
         query = ('Research for me open-air shopping centers and strip centers for sale in '
                  'Phoenix, AZ, United States, with an asking price between $1 million and $10 million. '
@@ -145,7 +150,7 @@ class ResearchTests(unittest.TestCase):
             research(query)
         queries = [call['params']['arguments']['query'] for call, _ in session.calls
                    if call['method'] == 'tools/call']
-        self.assertEqual(len(queries), 3)
+        self.assertEqual(len(queries), 5)
         for query in queries:
             self.assertLess(len(query), 200)
             self.assertIn(brief, query)
@@ -173,7 +178,7 @@ class ResearchTests(unittest.TestCase):
                     research(query)
             session.assert_not_called()
 
-    def test_real_client_three_searches_handshake_budgets_and_no_arbitrary_http(self):
+    def test_real_client_bounded_searches_handshake_and_no_arbitrary_http(self):
         outputs = [{"content": [], "structuredContent": {"results": [dict(RECORD, url=f"https://broker.example/{i}")]}}
                    for i in range(3)]
         session = FixtureSession(outputs)
@@ -183,26 +188,26 @@ class ResearchTests(unittest.TestCase):
             rows = research("Austin TX")
         self.assertEqual(len(rows), 3)
         searches = [call for call, _ in session.calls if call["method"] == "tools/call"]
-        self.assertEqual(len(searches), 3)
+        self.assertEqual(len(searches), 4)
         self.assertEqual(searches[0]["params"]["arguments"]["query"],
                          "open-air strip shopping centers for sale broker listings Austin TX")
         for search in searches:
             args = search["params"]["arguments"]
             self.assertEqual(search["params"]["name"], "nimble_search")
             self.assertEqual(args["max_results"], 10)
-            self.assertFalse(args["full_content"])
+            self.assertTrue(args["full_content"])
             self.assertFalse(args["include_answer"])
         self.assertTrue(session.closed)
         self.assertTrue(all(row["summary"] and row["retrieved_at"] for row in rows))
         self.assertNotIn("synthetic-key", json.dumps(rows))
 
-    def test_ten_results_stop_further_searches(self):
+    def test_ten_results_do_not_prevent_deeper_followups(self):
         records = [dict(RECORD, url=f"https://broker.example/{i}") for i in range(10)]
         session = FixtureSession([{"content": [], "structuredContent": {"results": records}}])
         with patch.dict(os.environ, {"NIMBLE_API_KEY": "synthetic"}, clear=True), \
                 patch("nimble_mcp.requests.Session", return_value=session):
             self.assertEqual(len(research("Austin TX")), 10)
-        self.assertEqual(sum(call["method"] == "tools/call" for call, _ in session.calls), 1)
+        self.assertEqual(sum(call["method"] == "tools/call" for call, _ in session.calls), 4)
 
     def test_first_search_resolves_retail_intent_without_changing_market_names(self):
         for brief, expected in (
@@ -216,17 +221,19 @@ class ResearchTests(unittest.TestCase):
                         patch('nimble_mcp.requests.Session', return_value=session):
                     research(brief)
                 searches = [call for call, _ in session.calls if call['method'] == 'tools/call']
-                self.assertEqual(len(searches), 1)
+                self.assertLessEqual(len(searches), 6)
                 self.assertEqual(searches[0]['params']['arguments']['query'],
                                  'open-air strip shopping centers for sale broker listings ' + expected)
 
-    def test_failure_never_retries_or_returns_cached_partial_results(self):
+    def test_failure_never_retries_and_retains_current_run_partial_results(self):
         session = FixtureSession([{"content": [], "structuredContent": {"results": [RECORD]}},
                                   {"content": [], "isError": True}])
         with patch.dict(os.environ, {"NIMBLE_API_KEY": "synthetic"}, clear=True), \
                 patch("nimble_mcp.requests.Session", return_value=session):
-            with self.assertRaises(IntegrationError):
-                research("Austin TX")
+            events = []
+            rows = research("Austin TX", on_progress=events.append)
+            self.assertEqual(rows[0]["url"], RECORD["url"])
+            self.assertIn("Further retrieval stopped", events[-1]["message"])
         self.assertEqual(sum(call["method"] == "tools/call" for call, _ in session.calls), 2)
         self.assertTrue(session.closed)
 
@@ -240,7 +247,7 @@ class ResearchTests(unittest.TestCase):
                 patch("nimble_mcp.requests.Session", return_value=session):
             rows = research("Austin TX")
         self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]["summary"], RECORD["description"])
+        self.assertIn("Later page excerpt", rows[0]["summary"])
         self.assertEqual(rows[0]["source_kind"], "page")
         self.assertEqual(rows[0]["page_excerpt"], "Later page excerpt")
         self.assertIn("Later snippet", rows[0]["excerpts"])
@@ -256,6 +263,120 @@ class ResearchTests(unittest.TestCase):
                 research("x" * 4000)
         searches = [call for call, _ in session.calls if call['method'] == 'tools/call']
         self.assertEqual(searches, [])
+
+    def test_model_followups_snapshots_and_budget(self):
+        self.planner.return_value = ["specific broker asking price", "local rent roll evidence"]
+        session = FixtureSession([{"content": [], "structuredContent": {"results": [RECORD]}}] * 8)
+        events = []
+        with patch.dict(os.environ, {"NIMBLE_API_KEY": "synthetic"}, clear=True), \
+                patch("nimble_mcp.requests.Session", return_value=session):
+            rows = research("Austin TX", on_progress=events.append)
+        calls = [call["params"]["arguments"] for call, _ in session.calls if call["method"] == "tools/call"]
+        self.assertEqual(len(calls), 6)
+        self.assertIn("specific broker asking price", calls[1]["query"])
+        self.planner.assert_called_once()
+        first_snapshot = next(event for event in events if event["leads"])
+        self.assertEqual(len(first_snapshot["leads"][0]["search_queries"]), 1)
+        self.assertEqual(len(rows[0]["search_queries"]), 6)
+        self.assertEqual({event["stage"] for event in events}, {"searching", "inspecting", "followup"})
+
+    def test_planner_failure_is_honest_and_does_not_lose_sources(self):
+        self.planner.side_effect = RuntimeError("PRIVATE_ERROR")
+        session = FixtureSession([{"content": [], "structuredContent": {"results": [RECORD]}}])
+        events = []
+        with patch.dict(os.environ, {"NIMBLE_API_KEY": "synthetic"}, clear=True), \
+                patch("nimble_mcp.requests.Session", return_value=session):
+            rows = research("Austin TX", events.append)
+        self.assertTrue(rows)
+        self.assertIn("planning unavailable", json.dumps(events))
+        self.assertNotIn("PRIVATE_ERROR", json.dumps(events))
+
+    def test_short_deadline_skips_model_and_invalid_budget_fails(self):
+        session = FixtureSession([{"content": [], "structuredContent": {"results": [RECORD]}}])
+        with patch.dict(os.environ, {"NIMBLE_API_KEY": "synthetic"}, clear=True), \
+                patch("nimble_mcp.requests.Session", return_value=session):
+            research("Austin TX", deadline_seconds=30)
+        self.planner.assert_not_called()
+        for value in (0, 301, float("inf"), True):
+            with self.assertRaises(IntegrationError):
+                research("Austin TX", deadline_seconds=value)
+
+    def test_later_full_page_replaces_directory_in_bounded_result_set(self):
+        directories = [dict(RECORD, url=f"https://directory{i}.example/search/") for i in range(10)]
+        page = dict(RECORD, content="Original property page asking price $4m, occupancy 75%.")
+        session = FixtureSession([{"content": [], "structuredContent": {"results": directories}},
+                                  {"content": [], "structuredContent": {"results": [page]}}])
+        with patch.dict(os.environ, {"NIMBLE_API_KEY": "synthetic"}, clear=True), \
+                patch("nimble_mcp.requests.Session", return_value=session):
+            rows = research("Austin TX")
+        self.assertEqual(len(rows), 10)
+        self.assertEqual(rows[0]["url"], RECORD["url"])
+        self.assertIn("Original property", rows[0]["summary"])
+
+    def test_first_search_failure_is_not_reported_as_success(self):
+        session = FixtureSession([{"content": [], "isError": True}])
+        with patch.dict(os.environ, {"NIMBLE_API_KEY": "synthetic"}, clear=True), \
+                patch("nimble_mcp.requests.Session", return_value=session):
+            with self.assertRaises(IntegrationError):
+                research("Austin TX")
+        self.planner.assert_not_called()
+
+    def test_deadline_preserves_results_and_stops_followups(self):
+        session = FixtureSession([{"content": [], "structuredContent": {"results": [RECORD]}}])
+        clock = [0]
+        events = []
+        def progress(event):
+            events.append(event)
+            if event["leads"]:
+                clock[0] = 241
+        with patch.dict(os.environ, {"NIMBLE_API_KEY": "synthetic"}, clear=True), \
+                patch("nimble_mcp.requests.Session", return_value=session), \
+                patch("app.live_discovery.time.monotonic", side_effect=lambda: clock[0]):
+            rows = research("Austin TX", progress)
+        self.assertEqual(len(rows), 1)
+        self.assertIn("time budget reached", events[-1]["message"])
+        self.assertEqual(sum(call["method"] == "tools/call" for call, _ in session.calls), 1)
+        self.planner.assert_not_called()
+
+
+class SearchCapabilityTests(unittest.TestCase):
+    def test_full_content_only_when_advertised_and_supported(self):
+        for capability in (None, {"type": "boolean"}, {"const": False}):
+            with self.subTest(capability=capability):
+                session = FixtureSession([{"content": [], "structuredContent": {"results": []}}])
+                properties = {"query": {"type": "string"}, "max_results": {"type": "integer"}}
+                if capability is not None:
+                    properties["full_content"] = capability
+                tool = {"name": "nimble_search", "annotations": {"readOnlyHint": True},
+                        "inputSchema": {"type": "object", "properties": properties,
+                                        "additionalProperties": False}}
+                with NimbleMCP("synthetic", transport=session) as client:
+                    with patch.object(client, "_search_tool", return_value=tool):
+                        client.search("retail listings", full_content=True)
+                arguments = next(call["params"]["arguments"] for call, _ in session.calls
+                                 if call["method"] == "tools/call")
+                if capability is None:
+                    self.assertNotIn("full_content", arguments)
+                else:
+                    self.assertEqual(arguments["full_content"], capability != {"const": False})
+
+    def test_expired_deadline_does_not_initialize_or_search(self):
+        session = FixtureSession([])
+        with self.assertRaisesRegex(IntegrationError, "time budget"):
+            with NimbleMCP("synthetic", transport=session, workflow_deadline=0):
+                pass
+        self.assertEqual(session.calls, [])
+        self.assertTrue(session.closed)
+
+    def test_callback_failure_stops_further_paid_work(self):
+        session = FixtureSession([])
+        def cancelled(event):
+            raise RuntimeError("cancelled")
+        with patch.dict(os.environ, {"NIMBLE_API_KEY": "synthetic"}, clear=True), \
+                patch("nimble_mcp.requests.Session", return_value=session):
+            with self.assertRaisesRegex(RuntimeError, "cancelled"):
+                research("Austin TX", cancelled)
+        self.assertEqual(session.calls, [])
 
 
 if __name__ == "__main__":

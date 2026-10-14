@@ -28,6 +28,7 @@ import {
   type ConversationSummary,
   type Lead,
   type ProviderStatus,
+  type ResearchResult,
 } from "./api";
 import { Markdown } from "./Markdown";
 import { Mcp } from "./McpConnections";
@@ -51,7 +52,7 @@ type Thread = {
   unavailable?: boolean;
 };
 type Mode = "auto" | "research" | "ask" | "schedule";
-type Progress = { key: string; stage: string; started: number; leads: Lead[] };
+type Progress = { key: string; stage: string; started: number; leads: Lead[]; activity?: ResearchResult["activity"] };
 const emptyThread: Thread = { messages: [] };
 export function messageIntent(
   message: string,
@@ -63,6 +64,9 @@ export function messageIntent(
     /\b(properties|property|centers?|centres?|malls?|leads|listings|retail|search|background agent)\b/i.test(message)
   )
     return "schedule";
+  if (
+    /\b(?:search\s+(?:again|further|for\s+(?:better|more|additional)\s+(?:resources|sources|evidence))|investigate\s+(?:further|more)|find\s+(?:better|more|additional)\s+(?:resources|sources|evidence))\b/i.test(message)
+  ) return "research";
   if (
     /\b(find|search|discover|research|look for)\b/i.test(message) &&
     /\b(properties|property|centers?|centres?|malls?|leads|listings|retail|deals|in\s+[A-Z])/i.test(
@@ -102,6 +106,7 @@ export default function App() {
   );
   const [path, setPath] = useState(window.location.pathname);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [historyExpanded, setHistoryExpanded] = useState(false);
   const [activeId, setActiveId] = useState(
     () =>
       new URLSearchParams(window.location.search).get("conversation") || "new",
@@ -115,6 +120,7 @@ export default function App() {
   const [historyError, setHistoryError] = useState("");
   const [historyVersion, setHistoryVersion] = useState(0);
   const [providers, setProviders] = useState<ProviderStatus>();
+  const [runsChecked, setRunsChecked] = useState(false);
   const [statusError, setStatusError] = useState("");
   const [statusVersion, setStatusVersion] = useState(0);
   const [threadLoading, setThreadLoading] = useState(false);
@@ -137,8 +143,9 @@ export default function App() {
   const [promptBankOpen, setPromptBankOpen] = useState(false);
   const controller = useRef<AbortController | null>(null);
   const bottom = useRef<HTMLDivElement>(null);
+  const followingActivity = useRef(true);
   const conversation = threads[activeId] || emptyThread;
-  const ready = Boolean(providers);
+  const ready = Boolean(providers) && runsChecked;
   const isMcp = /^\/landing(?:\/mcp)?\/?$/.test(path);
   function updateThread(key: string, update: (thread: Thread) => Thread) {
     cache.current = {
@@ -172,6 +179,7 @@ export default function App() {
   }
   function adoptThread(from: string, to: string) {
     if (activeThread.current !== from) return;
+    activeThread.current = to;
     setActiveId(to);
     const url = new URL(window.location.href);
     url.searchParams.set("conversation", to);
@@ -208,6 +216,83 @@ export default function App() {
       });
     return () => pending.abort();
   }, [statusVersion]);
+  useEffect(() => {
+    if (!providers) return;
+    const pending = new AbortController();
+    async function restoreRun() {
+      let resumedKey: string | undefined;
+      try {
+        const { runs } = await api.runs(pending.signal);
+        if (pending.signal.aborted) return;
+        const requested = activeThread.current;
+        const run = runs.find((item) =>
+          !item.agent_id && ["queued", "running"].includes(item.status) &&
+          (requested === "new" || item.conversation_id === requested || item.id === requested),
+        );
+        if (!run || controller.current) {
+          setRunsChecked(true);
+          return;
+        }
+        controller.current = pending;
+        let key = run.conversation_id;
+        resumedKey = key;
+        setBusyKey(key);
+        const saved = await api.conversation(key, pending.signal);
+        if (pending.signal.aborted) return;
+        if (saved.id !== key) throw new Error("Conversation response belongs to another thread.");
+        updateThread(key, () => ({
+          id: key,
+          messages: saved.messages.map((message, index) => ({
+            id: `${key}-${index}`, role: message.role, text: message.content,
+            sources: message.sources || undefined,
+          })),
+        }));
+        adoptThread(requested, key);
+        setRunsChecked(true);
+        setProgress({ key, stage: run.stage || run.status, started: Date.parse(run.started_at || "") || Date.now(), leads: run.leads, activity: run.activity });
+        const result = await streamResearch(run.id, pending.signal, (snapshot) => {
+          if (!pending.signal.aborted) setProgress((current) => ({
+            key, stage: snapshot.stage || snapshot.status,
+            started: Date.parse(snapshot.started_at || "") || current?.started || Date.now(),
+            leads: snapshot.leads, activity: snapshot.activity,
+          }));
+        });
+        if (pending.signal.aborted) return;
+        const finalKey = result.conversation_id || key;
+        if (finalKey !== key) {
+          const current = cache.current[key];
+          updateThread(finalKey, () => ({ ...current, id: finalKey }));
+          adoptThread(key, finalKey);
+          key = finalKey;
+          resumedKey = key;
+        }
+        updateThread(key, (current) => ({
+          ...current,
+          error: result.error || undefined,
+          artifactId: run.kind === "research" ? run.id : current.artifactId,
+          messages: result.analysis && !(current.messages.at(-1)?.role === "assistant" && current.messages.at(-1)?.text === result.analysis.answer)
+            ? [...current.messages, { id: `${run.id}-report`, role: "assistant", text: result.analysis.answer, sources: result.analysis.sources }]
+            : current.messages,
+        }));
+        setHistoryVersion((value) => value + 1);
+        setArtifactVersion((value) => value + 1);
+      } catch (error) {
+        if (!pending.signal.aborted) {
+          if (resumedKey && cache.current[resumedKey]) {
+            updateThread(resumedKey, (current) => ({ ...current, error: errorMessage(error) }));
+          } else setStatusError(`Could not restore active work: ${errorMessage(error)}`);
+        }
+      } finally {
+        if (controller.current === pending) {
+          controller.current = null;
+          setBusyKey(undefined);
+          setProgress(undefined);
+        }
+      }
+    }
+    void restoreRun();
+    return () => pending.abort();
+  }, [providers]);
   useEffect(() => {
     if (!ready) return;
     const pending = new AbortController();
@@ -295,6 +380,10 @@ export default function App() {
   useEffect(() => {
     bottom.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [conversation.messages.length, activeId]);
+  useEffect(() => {
+    if (progress?.key === activeId && followingActivity.current)
+      bottom.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+  }, [progress?.activity?.length, progress?.leads.length, progress?.stage, activeId, progress?.key]);
 
   async function send(event: FormEvent) {
     event.preventDefault();
@@ -322,6 +411,7 @@ export default function App() {
     controller.current = pending;
     setMode("auto");
     setBusyKey(key);
+    followingActivity.current = true;
     setDraft("");
     setPromptBankOpen(false);
     updateThread(key, (current) => ({
@@ -333,19 +423,27 @@ export default function App() {
       ],
     }));
     try {
-      if (intent === "research") {
-        const job = await api.research(message, pending.signal);
+      if (intent === "research" || intent === "ask") {
+        setProgress({ key, stage: "queued", started: Date.now(), leads: [] });
+        const job = intent === "research"
+          ? await api.research(message, pending.signal, conversation.id)
+          : await api.startChat({
+              message,
+              ...(scenarios[key] ? { scenario: scenarios[key]!.input } : {}),
+              ...(conversation.id ? { conversation_id: conversation.id } : {}),
+            }, pending.signal);
         if (pending.signal.aborted) return;
         const previousKey = key;
-        key = job.id;
+        key = ("conversation_id" in job && typeof job.conversation_id === "string" ? job.conversation_id : undefined) || conversation.id || job.id;
+        const currentThread = cache.current[previousKey];
         updateThread(key, () => ({
+          ...currentThread,
           id: key,
-          messages: [{ id: `${key}-brief`, role: "user", text: message }],
         }));
         adoptThread(previousKey, key);
         setBusyKey(key);
         setProgress({ key, stage: job.status, started: Date.now(), leads: [] });
-        const result = await streamResearch(key, pending.signal, (snapshot) => {
+        const result = await streamResearch(job.id, pending.signal, (snapshot) => {
           if (!pending.signal.aborted)
             setProgress((current) => ({
               key,
@@ -356,19 +454,27 @@ export default function App() {
                   ? Date.parse(snapshot.started_at)
                   : current?.started || Date.now(),
               leads: snapshot.leads,
+              activity: snapshot.activity,
             }));
         });
         if (pending.signal.aborted) return;
+        const finalKey = result.conversation_id || key;
+        if (finalKey !== key) {
+          const current = cache.current[key];
+          updateThread(finalKey, () => ({ ...current, id: finalKey }));
+          adoptThread(key, finalKey);
+          key = finalKey;
+        }
         updateThread(key, (current) => ({
           ...current,
-          artifactId: key,
+          artifactId: intent === "research" ? job.id : current.artifactId,
           error: result.error || undefined,
           messages: [
             ...current.messages,
             ...(result.analysis
               ? [
                   {
-                    id: `${key}-report`,
+                    id: `${job.id}-report`,
                     role: "assistant" as const,
                     text: result.analysis.answer,
                     sources: result.analysis.sources,
@@ -403,31 +509,6 @@ export default function App() {
         setAgentDraftKey(id);
         setAgentError(result.warnings.join(" "));
         adoptThread(key, id);
-      } else {
-        const result = await api.chat(
-          {
-            message,
-            ...(scenarios[key] ? {scenario:scenarios[key]!.input} : {}),
-            ...(conversation.id ? { conversation_id: conversation.id } : {}),
-          },
-          pending.signal,
-        );
-        if (pending.signal.aborted) return;
-        const current = cache.current[key];
-        updateThread(result.conversation_id, () => ({
-          ...current,
-          id: result.conversation_id,
-          messages: [
-            ...current.messages,
-            {
-              id: crypto.randomUUID(),
-              role: "assistant",
-              text: result.answer,
-              sources: result.sources,
-            },
-          ],
-        }));
-        adoptThread(key, result.conversation_id);
       }
       setHistoryVersion((value) => value + 1);
     } catch (error) {
@@ -557,9 +638,12 @@ export default function App() {
             <button
               className="chats-heading-button"
               aria-current={section === "chats" ? "page" : undefined}
-              onClick={() => { setSection("chats"); setSidebarOpen(false); }}
+              aria-expanded={historyExpanded}
+              aria-controls="chat-history"
+              onClick={() => { setSection("chats"); setHistoryExpanded((value) => !value); }}
             >
               <MessageSquare size={16} />Chats
+              <ChevronRight size={14} className={historyExpanded ? "history-chevron expanded" : "history-chevron"} />
             </button>
             <button
               className="icon-button"
@@ -576,7 +660,7 @@ export default function App() {
               {historyError}
             </Notice>
           )}
-          <div className="conversation-menu" aria-label="Past conversations">
+          <div id="chat-history" className="conversation-menu" aria-label="Past conversations" hidden={!historyExpanded}>
             {historyLoading && !history.length && (
               <p className="muted">Loading conversations...</p>
             )}
@@ -676,6 +760,10 @@ export default function App() {
             </header>
             <div
               className="chat-scroll"
+              onScroll={(event) => {
+                const element = event.currentTarget;
+                followingActivity.current = element.scrollHeight - element.scrollTop - element.clientHeight < 120;
+              }}
               aria-label="Conversation"
               aria-live="polite"
             >
@@ -771,6 +859,7 @@ export default function App() {
                     stage={progress.stage}
                     startedAt={progress.started}
                     count={progress.leads.length}
+                    activity={progress.activity}
                   />
                   {progress.leads.length > 0 && (
                     <details className="stream-sources">

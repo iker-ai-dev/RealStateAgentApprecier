@@ -49,11 +49,13 @@ it("resumes reads of the same job after transport failure without resubmitting",
     .spyOn(api, "researchResult")
     .mockResolvedValue({ id: "job", status: "completed", leads: [] });
   const create = vi.spyOn(api, "research");
+  const startChat = vi.spyOn(api, "startChat");
   const result = streamResearch("job", new AbortController().signal, vi.fn());
   TestStream.current.onerror?.();
   await result;
   expect(read).toHaveBeenCalledOnce();
   expect(create).not.toHaveBeenCalled();
+  expect(startChat).not.toHaveBeenCalled();
   expect(TestStream.current.close).toHaveBeenCalledOnce();
 });
 
@@ -63,6 +65,22 @@ it("rejects mismatched jobs without falling back or revealing them", async () =>
   TestStream.current.progress({ id: "other", status: "completed", leads: [] });
   await expect(result).rejects.toThrow("different job");
   expect(update).not.toHaveBeenCalled();
+});
+
+it("keeps polling the original job past five minutes after an early stream disconnect", async () => {
+  vi.useFakeTimers();
+  const read = vi.spyOn(api, "researchResult").mockResolvedValue({ id: "job", status: "running", leads: [] });
+  const create = vi.spyOn(api, "research");
+  const startChat = vi.spyOn(api, "startChat");
+  const result = streamResearch("job", new AbortController().signal, vi.fn());
+  TestStream.current.onerror?.();
+  await vi.advanceTimersByTimeAsync(602_000);
+  expect(read.mock.calls.length).toBeGreaterThan(300);
+  read.mockResolvedValue({ id: "job", status: "completed", leads: [], analysis: { answer: "Verified result", sources: [] } });
+  await vi.advanceTimersByTimeAsync(2000);
+  expect((await result).analysis?.answer).toBe("Verified result");
+  expect(create).not.toHaveBeenCalled();
+  expect(startChat).not.toHaveBeenCalled();
 });
 
 it("cancels the listener and ignores late snapshots", async () => {

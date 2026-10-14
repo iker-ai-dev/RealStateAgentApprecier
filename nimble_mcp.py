@@ -137,7 +137,7 @@ class NimbleMCP:
     """
     def __init__(self, key, *, source_domains=(), max_results=5, max_search_calls=3,
                  timeout=(10, 15), request_deadline=60, max_response_bytes=2_000_000,
-                 max_tool_pages=5, transport=None):
+                 max_tool_pages=5, transport=None, workflow_deadline=None):
         if (not isinstance(key, str) or not key or len(key) > 8192 or
                 key.lower().startswith("bearer ") or
                 any(ord(c) < 33 or ord(c) > 126 for c in key)):
@@ -156,6 +156,10 @@ class NimbleMCP:
         self.source_domains = _domains(source_domains)
         self.max_results, self.max_search_calls = max_results, max_search_calls
         self.timeout, self.request_deadline = tuple(timeout), request_deadline
+        if workflow_deadline is not None and (type(workflow_deadline) not in (int, float)
+                or not math.isfinite(workflow_deadline)):
+            raise IntegrationError("Use a finite Nimble workflow deadline.")
+        self.workflow_deadline = workflow_deadline
         self.max_response_bytes, self.max_tool_pages = max_response_bytes, max_tool_pages
         self._http = transport if transport is not None else requests.Session()
         self._headers = {"Authorization": "Bearer " + key,
@@ -193,7 +197,8 @@ class NimbleMCP:
         size, buffer, data = 0, bytearray(), []
         # Small chunks permit clock and byte checks during slowly arriving streams.
         for chunk in response.iter_content(chunk_size=1):
-            if time.monotonic() - started > self.request_deadline:
+            if (time.monotonic() - started > self.request_deadline or
+                    self.workflow_deadline is not None and time.monotonic() >= self.workflow_deadline):
                 raise IntegrationError("Nimble request exceeded its time budget; it was not retried.")
             size += len(chunk)
             if size > self.max_response_bytes:
@@ -211,7 +216,8 @@ class NimbleMCP:
                         if result is not None:
                             return result
                     data = []  # Empty SSE priming events and comments are allowed.
-        if time.monotonic() - started > self.request_deadline:
+        if (time.monotonic() - started > self.request_deadline or
+                self.workflow_deadline is not None and time.monotonic() >= self.workflow_deadline):
             raise IntegrationError("Nimble request exceeded its time budget; it was not retried.")
         if media == "application/json":
             return self._message(json.loads(bytes(buffer).decode("utf-8")), request_id)
@@ -220,6 +226,10 @@ class NimbleMCP:
     def _rpc(self, method, params=None, *, notification=False):
         if self._closed:
             raise IntegrationError("This Nimble client is closed; open a new client.")
+        remaining = (self.workflow_deadline - time.monotonic()
+                     if self.workflow_deadline is not None else None)
+        if remaining is not None and remaining <= 0:
+            raise IntegrationError("Nimble workflow time budget exhausted.")
         if self._requests >= 2 + self.max_search_calls * (self.max_tool_pages + 1):
             raise IntegrationError("Nimble workflow request budget exhausted.")
         self._requests += 1
@@ -231,7 +241,9 @@ class NimbleMCP:
         started = time.monotonic()
         try:
             with self._http.post(MCP_URL, json=payload, headers=self._headers,
-                    timeout=self.timeout, stream=True, allow_redirects=False) as response:
+                    timeout=(tuple(min(t, max(0.001, remaining / 2)) for t in self.timeout)
+                             if remaining is not None else self.timeout),
+                    stream=True, allow_redirects=False) as response:
                 status = response.status_code
                 if status == 404 and "Mcp-Session-Id" in self._headers:
                     self._ready = False
@@ -328,9 +340,11 @@ class NimbleMCP:
             params = {"cursor": cursor}
         raise IntegrationError("Nimble tool catalog exceeds the configured page limit; no search was sent.")
 
-    def search(self, query, *, source_domains=None, max_results=None):
+    def search(self, query, *, source_domains=None, max_results=None, full_content=False):
         if not self._ready:
             raise IntegrationError("Open the Nimble client with a context manager before searching.")
+        if type(full_content) is not bool:
+            raise IntegrationError("Full content must be a boolean.")
         count = self.max_results if max_results is None else max_results
         if type(count) is not int or not 1 <= count <= 10:
             raise IntegrationError("Request between one and ten Nimble search results.")
@@ -348,10 +362,14 @@ class NimbleMCP:
             raise IntegrationError("Nimble search schema lacks bounded query/result inputs; no search was sent.")
         args = {"query": query, "max_results": count}
         # Only documented parameters that the live MCP schema advertises are used.
-        for name, value in (("include_answer", False), ("full_content", False),
+        for name, value in (("include_answer", False), ("full_content", full_content),
                             ("include_domains", list(domains) if domains else None)):
             if name in props and value is not None:
                 args[name] = value
+        if full_content and "full_content" in args and not validator.is_valid(args):
+            # Some catalogs expose the flag but constrain it to false. Do not
+            # send an unsupported value or invent a different extraction tool.
+            args["full_content"] = False
         try:
             validator.validate(args)
         except Exception:
