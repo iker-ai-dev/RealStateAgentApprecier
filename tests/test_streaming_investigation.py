@@ -71,14 +71,19 @@ class StreamingInvestigationTests(unittest.TestCase):
 
     def test_greeting_then_research_followups_use_latest_research_context(self):
         queries = []
+        research_histories = []
         lead = {"id": "retail", "title": "Retail", "url": "https://example.com/retail"}
 
         def research(query):
             queries.append(query)
             return [lead]
 
-        app = create_app(store=self.store, research_fn=research,
-                         analyze_fn=lambda *args, **kwargs: {"answer": "Report", "sources": []})
+        def analyze(message, leads, history=None, *, mode=None):
+            if mode == "research":
+                research_histories.append(history)
+            return {"answer": "Earlier model report", "sources": []}
+
+        app = create_app(store=self.store, research_fn=research, analyze_fn=analyze)
         with TestClient(app) as client:
             response = client.post("/api/chat/start", json={"message": "hi"})
             self.assertEqual(response.status_code, 202)
@@ -113,6 +118,10 @@ class StreamingInvestigationTests(unittest.TestCase):
             latest = investigate("Find more sources")
             self.assertIn(new_brief, latest)
             self.assertNotIn("San Diego", latest)
+            for history in research_histories:
+                self.assertLessEqual(len(history), 4)
+                self.assertTrue(all(item["role"] == "user" for item in history))
+                self.assertNotIn("Earlier model report", json.dumps(history))
             messages = client.get(f"/api/conversations/{conversation_id}").json()["messages"]
             submitted = [item["content"] for item in messages if item["role"] == "user"]
             self.assertEqual(submitted, ["hi", brief, "Find better resources",

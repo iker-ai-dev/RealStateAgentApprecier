@@ -305,7 +305,10 @@ def create_app(*, store=None, research_fn=None, analyze_fn=None):
                 store.upsert_leads(owner, found)
                 store.update_job(owner, job_id, "running", leads=found, expected_status="running")
                 try:
-                    recent = store.messages(owner, conversation_id)[-8:] if conversation_id else []
+                    # Earlier reports can describe a different market. Keep the
+                    # user's intent, but never feed old AI claims into a new report.
+                    recent = [item for item in store.messages(owner, conversation_id)
+                              if item["role"] == "user"][-4:] if conversation_id else []
                     kwargs = {"history": [{"role": item["role"], "content": item["content"][:3000]}
                                            for item in recent] or None}
                     # Explicit opt-in keeps legacy injected analyzers unchanged.
