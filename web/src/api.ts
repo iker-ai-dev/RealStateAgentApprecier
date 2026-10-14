@@ -76,6 +76,15 @@ export const statusSchema = z.object({
   model: z.string(),
 });
 export type ProviderStatus = z.infer<typeof statusSchema>;
+const providerCheckSchema = z.object({
+  state: z.enum(["connected", "not_configured", "error"]),
+  checked_at: z.string(),
+  message: z.string(),
+});
+const providerChecksSchema = z.object({
+  providers: z.object({ snowflake: providerCheckSchema, nimble: providerCheckSchema }),
+});
+export type ProviderChecks = z.infer<typeof providerChecksSchema>;
 const analysisSchema = z.object({
   answer: z.string(),
   sources: z.array(z.object({ title: z.string(), url: z.string() })),
@@ -231,6 +240,7 @@ async function request<S extends z.ZodTypeAny>(
 }
 
 export const api = {
+  checkProviders: (signal?: AbortSignal) => request("/providers/check", providerChecksSchema, signal, {}),
   runs: (signal?: AbortSignal) => request("/runs", z.object({
     runs: z.array(researchSchema.extend({
       conversation_id: z.string(),

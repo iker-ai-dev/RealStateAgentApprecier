@@ -218,6 +218,13 @@ def create_app(*, store=None, research_fn=None, analyze_fn=None):
                 "storage": os.getenv("RETAILSCOPE_STORAGE", "sqlite"),
                 "billing_provider": "Snowflake Cortex"}
 
+    @app.post("/api/providers/check")
+    def check_providers(request: Request):
+        from app.provider_health import provider_health
+        if verify_browser_session(request.cookies.get("retailscope_session", ""), session_key) is None:
+            raise HTTPException(401, "An existing workspace session is required.")
+        return provider_health.check()
+
     @app.get("/api/leads")
     def leads(request: Request):
         from app.lead_facts import enrich_leads
