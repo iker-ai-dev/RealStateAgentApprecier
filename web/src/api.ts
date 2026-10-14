@@ -67,6 +67,11 @@ export const agentSchema = z.object({
   last_error: z.string().nullable(),
 });
 export type Agent = z.infer<typeof agentSchema>;
+export const agentRunSchema = z.object({
+  id: z.string(), created_at: z.string(), status: z.enum(["queued", "running", "completed", "partial", "failed"]),
+  query: z.string(), lead_count: z.number(), has_report: z.boolean(), error: z.string().optional(), agent_id: z.string(),
+});
+export type AgentRun = z.infer<typeof agentRunSchema>;
 export type AgentInput = Pick<
   Agent,
   "name" | "city" | "min_price" | "max_price" | "strategy"
@@ -295,6 +300,8 @@ export const api = {
     request(`/artifacts/${encodeURIComponent(id)}`, artifactSchema, signal),
   agents: (signal?: AbortSignal) =>
     request("/agents", z.object({ agents: z.array(agentSchema) }), signal),
+  agentRuns: (id: string, signal?: AbortSignal) =>
+    request(`/agents/${encodeURIComponent(id)}/runs`, z.object({ runs: z.array(agentRunSchema) }), signal),
   createAgent: (body: AgentInput, signal?: AbortSignal) =>
     request("/agents", agentSchema, signal, body),
   updateAgent: (id: string, enabled: boolean, signal?: AbortSignal) =>

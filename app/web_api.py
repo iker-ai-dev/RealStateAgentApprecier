@@ -410,6 +410,24 @@ def create_app(*, store=None, research_fn=None, analyze_fn=None):
                     agent.update(changes)
         return {"agents": [public_agent(agent) for agent in agents]}
 
+    @app.get("/api/agents/{agent_id}/runs")
+    def agent_runs(agent_id: str, request: Request):
+        owner = request.state.owner
+        if not agent_id.strip() or len(agent_id.encode("utf-8")) > 256:
+            raise HTTPException(404, "Background agent not found.")
+        if store.get_agent(owner, agent_id) is None:
+            raise HTTPException(404, "Background agent not found.")
+        runs = []
+        for job in store.list_agent_jobs(owner, agent_id):
+            run = {"id": job["id"], "created_at": job["created_at"],
+                   "status": job["status"], "query": job["query"],
+                   "lead_count": len(job.get("leads", [])),
+                   "has_report": job.get("analysis") is not None, "agent_id": agent_id}
+            if job.get("error"):
+                run["error"] = job["error"]
+            runs.append(run)
+        return {"runs": runs}
+
     @app.post("/api/agents/draft")
     def draft_agent(payload: AgentDraftRequest, request: Request):
         owner = request.state.owner
